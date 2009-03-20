@@ -1,0 +1,49 @@
+CPANPLUS-Dist-Arch
+
+This module is a wrapper used by CPANPLUS to install perl modules
+using the Archlinux pacman package manager.  This makes perl modules
+easier to remove, upgrade, etc.
+
+You will need to have pacman installed, of course, to create package
+and to install these new packages.  Pacman is included with Archlinux
+but can even be used on other Linux distributions.
+(see http://wiki.archlinux.org/index.php/Pacman)
+
+INSTALLATION
+
+To install this module, run the following commands:
+
+	perl Build.PL
+	./Build
+	./Build test
+	./Build install
+
+SUPPORT AND DOCUMENTATION
+
+After installing, you can find documentation for this module with the
+perldoc command.
+
+    perldoc CPANPLUS::Dist::Arch
+
+You can also look for information at:
+
+    RT, CPAN's request tracker
+        http://rt.cpan.org/NoAuth/Bugs.html?Dist=CPANPLUS-Dist-Arch
+
+    AnnoCPAN, Annotated CPAN documentation
+        http://annocpan.org/dist/CPANPLUS-Dist-Arch
+
+    CPAN Ratings
+        http://cpanratings.perl.org/d/CPANPLUS-Dist-Arch
+
+    Search CPAN
+        http://search.cpan.org/dist/CPANPLUS-Dist-Arch/
+
+
+COPYRIGHT AND LICENCE
+
+Copyright (C) 2009 Justin Davis
+
+This program is free software; you can redistribute it and/or modify it
+under the same terms as Perl itself.
+
