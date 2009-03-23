@@ -9,7 +9,6 @@ WriteMakefile
           'VERSION_FROM' => 'lib/CPANPLUS/Dist/Arch.pm',
           'PREREQ_PM' => {
                            'File::Copy' => 0,
-                           'version' => 0,
                            'IPC::Cmd' => 0,
                            'Readonly' => 0,
                            'Test::More' => 0,
