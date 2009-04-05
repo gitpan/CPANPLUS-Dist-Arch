@@ -4,6 +4,7 @@ MANIFEST
 README
 lib/CPANPLUS/Dist/Arch.pm
 lib/CPANPLUS/Dist/Arch.pod
+script/setupdistarch
 t/00-load.t
 t/01-translate.t
 t/pod-coverage.t

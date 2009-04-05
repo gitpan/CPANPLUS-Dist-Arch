@@ -16,7 +16,7 @@ use IPC::Cmd               qw(run can_run);
 use Readonly               qw(Readonly);
 use English                qw(-no_match_vars);
 
-our $VERSION = '0.05';
+our $VERSION = '0.06';
 
 ####
 #### CLASS CONSTANTS
@@ -78,16 +78,16 @@ source='[% srcurl %]'
 md5sums=('[% md5sum %]')
 
 build() {
+  export PERL_MM_USE_DEFAULT=1
+  ( cd "${srcdir}/[% distdir %]" &&
 [% IF is_makemaker %]
-  ( cd "${srcdir}/[% distdir %]"
     perl Makefile.PL INSTALLDIRS=vendor &&
     make &&
-[% skiptest_comment %]   PERL_MM_USE_DEFAULT=1 make test &&
+[% skiptest_comment %]   make test &&
     make DESTDIR="${pkgdir}/" install
   ) || return 1;
 [% FI %]
 [% IF is_modulebuild %]
-  ( cd "${srcdir}/[% distdir %]"
     perl Build.PL --installdirs=vendor --destdir="$pkgdir" &&
     ./Build &&
 [% skiptest_comment %]   ./Build test &&
@@ -260,18 +260,27 @@ sub install
     my $intern = $module->parent;           # CPANPLUS::Internals
     my $conf   = $intern->configure_object; # CPANPLUS::Configure
 
-    # Make sure the user has high access to install a package...
+    my $pkgfile_fpq = $status->dist
+        or die << 'END_ERROR';
+Path to package file has not been set.
+Someone is using CPANPLUS::Dist::Arch incorrectly.
+Tell them to call create() before install().
+END_ERROR
+
+    die "Package file $pkgfile_fpq was not found" if ( ! -f $pkgfile_fpq );
+
+    # Make sure the user has access to install a package...
     my $sudocmd = $conf->get_program('sudo');
     if ( $EFFECTIVE_USER_ID != $ROOT_USER_ID ) {
         if ( $sudocmd ) {
-            system "$sudocmd pacman -U ${\$status->dist}";
+            system "$sudocmd pacman -U $pkgfile_fpq";
         }
         else {
             error $NONROOT_WARNING;
             return 0;
         }
     }
-    else { system "pacman -U ${\$status->dist}"; }
+    else { system "pacman -U $pkgfile_fpq"; }
 
     if ($CHILD_ERROR) {
         error ( $CHILD_ERROR & 127
@@ -306,8 +315,9 @@ sub _translate_name
         if $PKGNAME_OVERRIDES->{$distname};
 
     # Package names should be lowercase and consist of alphanumeric
-    # characters only...
-    $distname = lc $distname;
+    # characters only (and hyphens!)...
+    $distname =  lc $distname;
+    $distname =~ tr/_/-/;
     $distname =~ tr/-a-z0-9//cd;
     $distname =~ tr/-/-/s;
 
@@ -326,7 +336,7 @@ sub _translate_name
 }
 
 #---INSTANCE METHOD---
-# Purpose  : Convert CPAN a module's distribution version into our more
+# Purpose  : Convert a module's CPAN distribution version into our more
 #            restrictive pacman package version number.
 #---------------------
 sub _translate_version
@@ -348,6 +358,8 @@ sub _translate_version
 #---------------------
 sub _translate_cpan_deps
 {
+    die 'Invalid arguments to _translate_cpan_deps method'
+        if @_ != 1;
     my ($self) = @_;
 
     my %pkgdeps;
@@ -399,6 +411,7 @@ sub _translate_cpan_deps
 #TODO# This should also look in the module source code's POD.
 sub _prepare_pkgdesc
 {
+    die 'Invalid arguments to _prepare_pkgdesc method' if @_ != 1;
     my ($self) = @_;
     my ($status, $module, $pkgdesc) = ($self->status, $self->parent);
 
@@ -454,6 +467,7 @@ sub _prepare_pkgdesc
 #---------------------
 sub _prepare_status
 {
+    die 'Invalid arguments to _prepare_status method' if @_ != 1;
     my $self     = shift;
     my $status   = $self->status; # Private hash
     my $module   = $self->parent; # CPANPLUS::Module
@@ -494,10 +508,11 @@ sub _prepare_status
 #---------------------
 sub _get_disturl
 {
+    die 'Invalid arguments to _get_disturl method' if @_ != 1;
     my $self   = shift;
     my $module = $self->parent;
 
-    my $distname  = $module->package;
+    my $distname  = $module->package_name;
     return join '/', $CPANURL, 'dist', $distname;
 }
 
@@ -508,6 +523,7 @@ sub _get_disturl
 #---------------------
 sub _get_srcurl
 {
+    die 'Invalid arguments to _get_srcurl method' if @_ != 2;
     my ($self) = @_;
     my $module = $self->parent;
 
