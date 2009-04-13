@@ -21,6 +21,7 @@ WriteMakefile
                            'File::Path' => 0,
                            'Module::CoreList' => 0,
                            'File::Spec::Functions' => 0,
+                           'Pod::Select' => 0,
                            'CPANPLUS' => 0,
                            'File::stat' => 0
                          }

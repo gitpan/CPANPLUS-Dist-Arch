@@ -9,6 +9,7 @@ use File::Spec::Functions  qw(catfile catdir);
 use Module::CoreList       qw();
 use CPANPLUS::Error        qw(error msg);
 use Digest::MD5            qw();
+use Pod::Select            qw();
 use File::Path             qw(mkpath);
 use File::Copy             qw(copy);
 use File::stat             qw(stat);
@@ -16,7 +17,7 @@ use IPC::Cmd               qw(run can_run);
 use Readonly               qw(Readonly);
 use English                qw(-no_match_vars);
 
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 
 ####
 #### CLASS CONSTANTS
@@ -228,11 +229,12 @@ sub create
     # Wrap it up!
     chdir $status->pkgbase or die "chdir: $OS_ERROR";
     my $makepkg_cmd = join ' ', ( 'makepkg',
+                                  ( $EUID == 0      ? '--asroot'   : () ),
                                   ( !$opts{verbose} ? '>/dev/null' : () )
                                  );
 
     # I tried to use IPC::Cmd here, but colors didn't work...
-    system 'makepkg';
+    system $makepkg_cmd;
     if ($CHILD_ERROR) {
         error ( $CHILD_ERROR & 127
                 ? sprintf "makepkg failed with signal %d", $CHILD_ERROR & 127
@@ -406,15 +408,16 @@ sub _translate_cpan_deps
 # Postcond : Sets the $self->status->pkgdesc accessor to the found
 #            package description.
 # Returns  : The package short description.
-# Comments : We search through the META.yml file and then the README file.
+# Comments : We search through the META.yml file, the main module's .pm file,
+#            .pod file, and then the README file.
 #---------------------
-#TODO# This should also look in the module source code's POD.
 sub _prepare_pkgdesc
 {
     die 'Invalid arguments to _prepare_pkgdesc method' if @_ != 1;
     my ($self) = @_;
     my ($status, $module, $pkgdesc) = ($self->status, $self->parent);
 
+    # Registered modules have their description stored in the object.
     return $status->pkgdesc( $module->description )
         if ( $module->description );
 
@@ -438,21 +441,68 @@ sub _prepare_pkgdesc
         close $metayml;
     }
 
-    # Next, try to find it in in the README file
-    open my $readme, '<', $module->status->extract . '/README'
-        or return $status->pkgdesc(q{});
-#   error( "Could not open README to get pkgdesc: $!" ), return undef;
+    # Next, parse the source file or pod file for a NAME section...
+    my $podselect = Pod::Select->new;
+    $podselect->select('NAME');
+    my $modname   = $module->name;
 
-    my $modname = $module->name;
-    while ( <$readme> ) {
-        chomp;
-        if ( (/^NAME/ ... /^[A-Z]+/) &&
-             (($pkgdesc) = / ^ \s* ${modname} [\s\-]+ (.+) $ /oxms) ) {
-            close $readme;
-            return $status->pkgdesc($pkgdesc);
-        }
+    # We use the package name because there is usually a module file
+    # with the exact same name as the package file.
+    #
+    # We want the main module's description, just in case the user requested
+    # a lesser module in the same package file.
+    #
+    # Assume the main .pm or .pod file is under lib/Module/Name/Here.pm
+    my $mainmod_file = $module->package_name;
+
+    $mainmod_file =~ tr{-}{/}s;
+    $mainmod_file = catfile( $module->status->extract, 'lib', $mainmod_file );
+
+    PODSEARCH:
+    for my $podfile_path ( map { "$mainmod_file.$_" } qw/pm pod/ ) {
+        my $name_section = '';
+
+        next PODSEARCH unless ( -e $podfile_path );
+        open my $podfile, '<', $podfile_path
+            or next PODSEARCH;
+
+        open my $podout, '>', \$name_section
+            or die "failed open on filehandle to string: $!";
+        $podselect->parse_from_filehandle( $podfile, $podout );
+
+        close $podfile;
+        close $podout
+            or die "failed close on filehandle to string: $!";
+
+        next PODSEARCH unless ($name_section);
+
+        # Remove formatting codes.
+        $name_section =~ s{ [IBCLEFSXZ]  <(.*?)>  }{$1}gxms;
+        $name_section =~ s{ [IBCLEFSXZ] <<(.*?)>> }{$1}gxms;
+
+        # The short desc is on a line beginning with 'Module::Name - '
+        return $status->pkgdesc($pkgdesc)
+            if ( ($pkgdesc) = $name_section =~ / ^ \s* $modname [\s-]+ (.+?) $ /xms );
     }
-    close $readme;
+
+    # Last, try to find it in in the README file
+    README:
+    {
+        open my $readme, '<', $module->status->extract . '/README'
+            or last README;
+        #   error( "Could not open README to get pkgdesc: $!" ), return undef;
+
+        my $modname = $module->name;
+        while ( <$readme> ) {
+            chomp;
+            if ( (/^NAME/ ... /^[A-Z]+/) # limit ourselves to a NAME section
+                 && ( ($pkgdesc) = / ^ \s* ${modname} [\s\-]+ (.+) $ /oxms) ) {
+                close $readme;
+                return $status->pkgdesc($pkgdesc);
+            }
+        }
+        close $readme;
+    }
 
     return $status->pkgdesc(q{});
 }
@@ -523,7 +573,7 @@ sub _get_disturl
 #---------------------
 sub _get_srcurl
 {
-    die 'Invalid arguments to _get_srcurl method' if @_ != 2;
+    die 'Invalid arguments to _get_srcurl method' if @_ != 1;
     my ($self) = @_;
     my $module = $self->parent;
 
