@@ -11,15 +11,16 @@ my $builder = Module::Build->new(
         'Test::More' => 0,
     },
     requires => {
-        'perl'                  => '5.8.0', # thx to CPAN Testers
+        # 'perl'                  => '5.8.0', # thx to CPAN Testers
+        # above might have changed without Readonly
 
-        'Readonly'              => 0, # <-- The only module not in
-        'CPANPLUS'              => 0, #     core for perl 5.10
+        'CPANPLUS'              => 0,
         'Digest::MD5'           => 0,
         'File::Path'            => 0, # I'm not sure which versions
         'File::Copy'            => 0, # are necessary?
         'File::stat'            => 0,
         'IPC::Cmd'              => 0,
+        'DynaLoader'            => 0,
         'Pod::Select'           => 0,
         'Module::CoreList'      => 0,
         'File::Spec::Functions' => 0,
@@ -27,7 +28,7 @@ my $builder = Module::Build->new(
         'Getopt::Long'          => 0, # for the setupdistarch script
         'Pod::Usage'            => 0,
     },
-    script_files => [ 'script/setupdistarch' ],
+    script_files => [ qw{ script/cpan2aur script/setupdistarch } ],
     add_to_cleanup      => [ 'CPANPLUS-Dist-Arch-*' ],
     create_makefile_pl  => 'traditional',
 );

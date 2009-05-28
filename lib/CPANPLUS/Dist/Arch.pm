@@ -3,46 +3,69 @@ package CPANPLUS::Dist::Arch;
 use warnings;
 use strict;
 
-use base 'CPANPLUS::Dist::Base';
+use base qw(CPANPLUS::Dist::Base);
 
 use File::Spec::Functions  qw(catfile catdir);
 use Module::CoreList       qw();
 use CPANPLUS::Error        qw(error msg);
+use List::MoreUtils        qw(uniq);
 use Digest::MD5            qw();
 use Pod::Select            qw();
 use File::Path             qw(mkpath);
 use File::Copy             qw(copy);
 use File::stat             qw(stat);
+use DynaLoader             qw();
 use IPC::Cmd               qw(run can_run);
-use Readonly               qw(Readonly);
 use English                qw(-no_match_vars);
 
-our $VERSION = '0.08';
+use Data::Dumper;
 
-####
-#### CLASS CONSTANTS
-####
 
-Readonly my $MKPKGCONF_FQP => '/etc/makepkg.conf';
-Readonly my $CPANURL       => 'http://search.cpan.org';
-Readonly my $ROOT_USER_ID  => 0;
+our $VERSION = '0.09';
 
-Readonly my $NONROOT_WARNING => <<'END_MSG';
+#----------------------------------------------------------------------
+# CLASS CONSTANTS
+#----------------------------------------------------------------------
+
+my $MKPKGCONF_FQP = '/etc/makepkg.conf';
+my $CPANURL       = 'http://search.cpan.org';
+my $ROOT_USER_ID  = 0;
+
+my $NONROOT_WARNING = <<'END_MSG';
 In order to install packages as a non-root user (highly recommended)
 you must have a sudo-like command specified in your CPANPLUS
 configuration.
 END_MSG
 
+# Patterns to use when using pacman for finding library owners.
+my $PACMAN_FINDOWN     = qr/\A[^ ]+ is owned by (\w+) ([\w.]+)/;
+my $PACMAN_FINDOWN_ERR = qr/\Aerror:/;
+
 
 # Override a package's name to conform to packaging guidelines.
-# Copied entries from CPANPLUS::Dist::Pacman.
-Readonly my $PKGNAME_OVERRIDES =>
+# Copied entries from CPANPLUS::Dist::Pacman and alot more
+# from searching for packages with perl in their name in
+# [extra] and [community]
+my $PKGNAME_OVERRIDES =
 { map { split /[\s=]+/ } split /\s*\n+\s*/, <<'END_OVERRIDES' };
 
 libwww-perl    = perl-libwww
-mod_perl       = perl-modperl
 glade-perl-two = perl-glade-two
 aceperl        = perl-ace
+
+Gnome2-GConf   = gconf-perl
+Gtk2-GladeXML  = glade-perl
+Glib           = glib-perl
+Gnome2         = gnome-perl
+Gnome2-VFS     = gnome-vfs-perl
+Gnome2-Canvas  = gnomecanvas-perl
+Gtk2           = gtk2-perl
+XML-LibXML     = libxml-perl
+mod_perl       = mod_perl
+Pango          = pango-perl
+XML-Parser     = perlxml0
+SDL_Perl       = sdl_perl
+shorewall-perl = shorewall-perl
 
 END_OVERRIDES
 
@@ -63,7 +86,7 @@ END_OVERRIDES
 =cut
 
 # Crude template for our PKGBUILD script
-Readonly my $PKGBUILD_TEMPL => <<'END_TEMPL';
+my $PKGBUILD_TEMPL = <<'END_TEMPL';
 # Contributor: [% packager %]
 # Generator  : CPANPLUS::Dist::Arch [% version %]
 pkgname='[% pkgname %]'
@@ -80,20 +103,20 @@ md5sums=('[% md5sum %]')
 
 build() {
   export PERL_MM_USE_DEFAULT=1
-  ( cd "${srcdir}/[% distdir %]" &&
+  { cd "${srcdir}/[% distdir %]" &&
 [% IF is_makemaker %]
     perl Makefile.PL INSTALLDIRS=vendor &&
     make &&
 [% skiptest_comment %]   make test &&
-    make DESTDIR="${pkgdir}/" install
-  ) || return 1;
+    make DESTDIR="${pkgdir}/" install;
+  } || return 1;
 [% FI %]
 [% IF is_modulebuild %]
     perl Build.PL --installdirs=vendor --destdir="$pkgdir" &&
     ./Build &&
 [% skiptest_comment %]   ./Build test &&
-    ./Build install
-  ) || return 1;
+    ./Build install;
+  } || return 1;
 [% FI %]
 
   find "$pkgdir" -name .packlist -delete
@@ -101,9 +124,9 @@ build() {
 }
 END_TEMPL
 
-####
-#### CLASS GLOBALS
-####
+#----------------------------------------------------------------------
+# CLASS GLOBALS
+#----------------------------------------------------------------------
 
 our ($PKGDEST, $PACKAGER);
 
@@ -124,17 +147,29 @@ READ_CONF:
     my $cfg_var_match = '(' . join( '|', keys %cfg_vars ) . ')';
 
     while (<$mkpkgconf>) {
-        if (/ ^ $cfg_var_match = "? (.*?) "? $ /xmso) {
+        if (/ ^ $cfg_var_match = "? (.*) "? $ /xmso) {
             ${$cfg_vars{$1}} = $2;
         }
     }
     close $mkpkgconf or error "close on makepkg.conf: $!";
 }
 
-####
-#### PUBLIC CPANPLUS::Dist::Base Interface
-####
+#-------------------------------------------------------------------------------
+# PUBLIC CPANPLUS::Dist::Base Interface
+#-------------------------------------------------------------------------------
 
+=for Interface Methods
+See L<CPANPLUS::Dist::Base>'s documentation for a description of the
+purpose of these functions.  All of these "interface" methods override
+Base's default actions in order to create our packages.
+
+=cut
+
+#---INTERFACE METHOD---
+# Purpose  : Checks if we have makepkg and pacman installed
+# Returns  : 1 - if we have the tools needed to make a pacman package.
+#            0 - if we don't think so.
+#----------------------
 sub format_available
 {
     for my $prog ( qw/ makepkg pacman / ) {
@@ -146,6 +181,10 @@ sub format_available
     return 1;
 }
 
+#---INTERFACE METHOD---
+# Purpose  : Initializes our object internals to get things started
+# Returns  : 1 always
+#----------------------
 sub init
 {
     my $self = shift;
@@ -156,6 +195,14 @@ sub init
     return 1;
 }
 
+#---INTERFACE METHOD---
+# Purpose  : Prepares the files and directories we will need to build a
+#            package.  Also prepares any data we expect to have later,
+#            on a per-object basis.
+# Return   : 1 if ok, 0 on error.
+# Postcond : Sets $self->status->prepare to 1 or 0 on success or
+#            failure.
+#----------------------
 sub prepare
 {
     my $self = shift;
@@ -174,6 +221,9 @@ sub prepare
     return $self->SUPER::prepare(@_);
 }
 
+#---INTERFACE METHOD---
+# Purpose  : Creates the pacman package using the 'makepkg' command.
+#----------------------
 sub create
 {
     my ($self, %opts) = (shift, @_);
@@ -272,6 +322,11 @@ Package type must be 'bin' or 'src'}
     return $status->created(1);
 }
 
+#---INTERFACE METHOD---
+# Purpose  : Installs the package file (.pkg.tar.gz) using sudo and
+#            pacman.
+# Comments : Called automatically on pre-requisite packages
+#----------------------
 sub install
 {
     my ($self, %opts) = (shift, @_);
@@ -314,10 +369,9 @@ END_ERROR
     return $status->installed(1);
 }
 
-
-####
-#### PUBLIC METHODS
-####
+#-------------------------------------------------------------------------------
+# PUBLIC METHODS
+#-------------------------------------------------------------------------------
 
 sub set_destdir
 {
@@ -378,7 +432,7 @@ sub get_pkgbuild
     my $pkgdesc = $status->pkgdesc;
     my $extdir  = $module->package;
     $extdir     =~ s/ [.] ${\$module->package_extension} \z //xms;
-    $pkgdesc    =~ s/ " / \\" /gxms; # Quote our package desc for bash.
+    $pkgdesc    =~ s/ ([\$\"\`\!]) / \\$1 /gxms; # Quote our package desc for bash.
 
     my $templ_vars = { packager  => $PACKAGER,
                        version   => $VERSION,
@@ -429,13 +483,12 @@ Directory does not exist or is not writeable}
     return;
 }
 
-
-####
-#### PRIVATE INSTANCE METHODS
-####
+#-------------------------------------------------------------------------------
+# PRIVATE INSTANCE METHODS
+#-------------------------------------------------------------------------------
 
 #---INSTANCE METHOD---
-# Usage   : my $pkgname = $self->_translate_pkgname($dist_name);
+# Usage   : my $pkgname = $self->_translate_name($dist_name);
 # Purpose : Converts a module's dist[ribution tarball] name to an
 #           Archlinux style perl package name.
 # Params  : $dist_name - The name of the distribution (ex: Acme-Drunk)
@@ -529,6 +582,19 @@ sub _translate_cpan_deps
     # the module if there is no explicit perl version required...
     $pkgdeps{perl} ||= sprintf '%vd', $PERL_VERSION;
 
+    # Merge in the XS C library package deps...
+    my $xs_deps = $self->_translate_xs_deps;
+#    print STDERR Dumper($xs_deps);
+
+    XSDEP_LOOP:
+    while ( my ($name, $ver) = each %$xs_deps ) {
+        # TODO: report this error?
+        next XSDEP_LOOP if ( exists $pkgdeps{$name} );
+        $pkgdeps{$name} = $ver;
+    }
+
+    # Return a hash if in list context or return a string representing
+    # the depends= line in the PKGBUILD if caller wants a scalar.
     return %pkgdeps if ( wantarray );
 
     return ( join ' ',
@@ -773,6 +839,99 @@ sub _process_template
                }xmseg;
 
     return $templ;
+}
+
+#-----------------------------------------------------------------------------
+# XS module library dependency hunting
+#-----------------------------------------------------------------------------
+
+#---INSTANCE METHOD---
+# Usage    : $deps_ref = $self->_translate_cs_deps;
+# Purpose  : Attempts to find non-perl dependencies in XS modules.
+# Returns  : A hashref of 'package name' => 'minimum version'.
+#            (Minimum version will be the current installed version of the library)
+#---------------------
+sub _translate_xs_deps
+{
+    my $self = shift;
+
+    my $modstat   = $self->parent->status;
+    my $inst_type = $modstat->installer_type;
+    my $distcpan  = $modstat->dist_cpan;
+
+    # Delegate to the other methods depending on the dist type...
+    my $libs_ref = ( $inst_type eq 'CPANPLUS::Dist::MM'    ?
+                     $self->_get_mm_xs_deps($distcpan)     :
+                     $inst_type eq 'CPANPLUS::Dist::Build' ?
+                     $self->_get_mb_xs_deps($distcpan)     :
+                     die qq{Unknown installer type "$inst_type"} );
+
+    # Turn the linker flags into libraries and packages
+    return +{ map { ($self->_get_lib_pkg($_)) }
+              @$libs_ref };
+}
+
+#---INSTANCE METHOD---
+# Usage    : %pkg = $self->_get_lib_pkg($lib)
+# Params   : $lib - Can be a dynamic library name, with/without lib prefix
+#                   or the -l<name> flag that is passed to the linker.
+#                   (anything DynaLoader::dl_findfile accepts)
+# Returns  : A hash (or two element list) of 'package name' => 'installed version'
+#            or an empty list if the lib/package owner could not be found.
+#---------------------
+sub _get_lib_pkg
+{
+    my ($self, $libname) = @_;
+
+    my $lib_fqp = DynaLoader::dl_findfile($libname)
+        or return ();
+    my $result = `pacman -Qo $lib_fqp`;
+    chomp $result;
+
+    if ( $result =~ /$PACMAN_FINDOWN_ERR/ ) {
+        error qq{Could not find owner of linked library "$libname", ignoring.};
+        return ();
+    }
+
+    my ($pkgname, $pkgver) = $result =~ /$PACMAN_FINDOWN/;
+    return ($pkgname => $pkgver);
+}
+
+#---INSTANCE METHOD---
+# Usage    : my $deps_ref = $self->_get_mm_xs_deps($dist_obj);
+# Params   : $dist_obj - A CPANPLUS::Dist::MM object
+# Returns  : Arrayref of library flags (-l...) passed to the linker on build.
+#---------------------
+sub _get_mm_xs_deps
+{
+    my ($self, $dist) = @_;
+
+    my $field_srch = '\A(?:EXTRALIBS|LDLOADLIBS|BSLOADLIBS) = (.+)\z';
+
+    my $mkfile_fqp = $dist->status->makefile
+        or die "Internal error: makefile() path is unset in our object";
+
+    open my $mkfile, '<', $mkfile_fqp
+        or die "Internal error: failed to open Makefile at $mkfile_fqp ... $!";
+    my @libs = uniq map { chomp; (/$field_srch/o) } <$mkfile>;
+    close $mkfile;
+
+    return [ grep { /\A-l/ } map { split } @libs ];
+}
+
+#---INSTANCE METHOD---
+# Usage    : my $deps_ref = $self->_get_mb_xs_deps($dist_obj);
+# Params   : $dist_obj - A CPANPLUS::Dist::Build object
+# Returns  : Arrayref of library flags (-l...) passed to the linker on build.
+#---------------------
+sub _get_mb_xs_deps
+{
+    my ($self, $dist) = @_;
+
+    my $mbobj = $dist->status->_mb_object;
+    my $linker_flags = $mbobj->extra_linker_flags;
+
+    return [ uniq grep { /\A-l/ } map { split } @{$linker_flags} ];
 }
 
 1; # End of CPANPLUS::Dist::Arch
