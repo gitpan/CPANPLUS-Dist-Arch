@@ -15,6 +15,7 @@ WriteMakefile
                            'File::Copy' => 0,
                            'Pod::Usage' => 0,
                            'IPC::Cmd' => 0,
+                           'Carp' => 0,
                            'Test::More' => 0,
                            'Digest::MD5' => 0,
                            'File::Path' => 0,
