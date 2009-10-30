@@ -3,7 +3,7 @@ package CPANPLUS::Dist::Arch;
 use warnings;
 use strict;
 
-use base qw(CPANPLUS::Dist::Base);
+use base qw(CPANPLUS::Dist::Base Exporter);
 
 use File::Spec::Functions  qw(catfile catdir);
 use Module::CoreList       qw();
@@ -14,18 +14,22 @@ use File::Path             qw(mkpath);
 use File::Copy             qw(copy);
 use File::stat             qw(stat);
 use DynaLoader             qw();
-use IPC::Cmd               qw(run can_run);
+use IPC::Cmd               qw(can_run);
+use version                qw(qv);
 use English                qw(-no_match_vars);
 use Carp                   qw(carp croak);
+use Cwd                    qw();
 
-use Data::Dumper;
+our $VERSION     = '0.12';
+our @EXPORT      = qw();
+our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
+our @EXPORT_TAGS = ( ':all' => \@EXPORT_OK );
 
-
-our $VERSION = '0.11';
 
 #----------------------------------------------------------------------
 # CLASS CONSTANTS
 #----------------------------------------------------------------------
+
 
 my $MKPKGCONF_FQP = '/etc/makepkg.conf';
 my $CPANURL       = 'http://search.cpan.org';
@@ -40,7 +44,7 @@ configuration.
 END_MSG
 
 # Patterns to use when using pacman for finding library owners.
-my $PACMAN_FINDOWN     = qr/\A[^ ]+ is owned by (\w+) ([\w.]+)/;
+my $PACMAN_FINDOWN     = qr/\A[^ ]+ is owned by ([\w-]+) ([\w.-]+)/;
 my $PACMAN_FINDOWN_ERR = qr/\Aerror:/;
 
 
@@ -73,15 +77,14 @@ END_OVERRIDES
 
 =for Mini-Template Format
     The template format is very simple, to insert a template variable
-    use [% var_name %] this will insert the template variable's value.
+    use [% foo %].  This will insert the value of the variable
+    named 'foo'.
  
     The print_template() sub will throw: 'Template variable ... was
-    not provided' if the variable given by var_name is not defined.
+    not provided' if the variable was not defined.
  
     [% IF var_name %] ... [% FI %] will remove the ... stuff if the
     variable named var_name is not set to a true value.
- 
-    WARNING: IF blocks cannot be nested!
  
     See the _process_template method below.
 
@@ -98,37 +101,39 @@ pkgdesc="[% pkgdesc %]"
 arch=('i686' 'x86_64')
 license=('PerlArtistic' 'GPL')
 options=('!emptydirs')
-depends=([% pkgdeps %])
-url='[% disturl %]'
-source=('[% srcurl %]')
-md5sums=('[% md5sum %]')
+depends=([% depends %])
+url='[% url %]'
+source=('[% source %]')
+md5sums=('[% md5sums %]')
 
 build() {
+  _DISTDIR="${srcdir}/[% distdir %]"
   export PERL_MM_USE_DEFAULT=1
-  { cd "${srcdir}/[% distdir %]" &&
+  { cd "$_DISTDIR" &&
 [% IF is_makemaker %]
     perl Makefile.PL INSTALLDIRS=vendor &&
     make &&
     [% IF skiptest %]#[% FI %]make test &&
     make DESTDIR="${pkgdir}/" install;
-  } || return 1;
 [% FI %]
 [% IF is_modulebuild %]
     perl Build.PL --installdirs=vendor --destdir="$pkgdir" &&
     ./Build &&
     [% IF skiptest %]#[% FI %]./Build test &&
     ./Build install;
-  } || return 1;
 [% FI %]
+  } || return 1;
 
   find "$pkgdir" -name .packlist -delete
   find "$pkgdir" -name perllocal.pod -delete
 }
 END_TEMPL
 
+
 #----------------------------------------------------------------------
 # CLASS GLOBALS
 #----------------------------------------------------------------------
+
 
 our ($PKGDEST, $PACKAGER);
 
@@ -168,9 +173,11 @@ READ_CONF:
     close $mkpkgconf or error "close on makepkg.conf: $!";
 }
 
+
 #-------------------------------------------------------------------------------
 # PUBLIC CPANPLUS::Dist::Base Interface
 #-------------------------------------------------------------------------------
+
 
 =for Interface Methods
 See CPANPLUS::Dist::Base's documentation for a description of the
@@ -292,12 +299,17 @@ Package type must be 'bin' or 'src'};
     my $pkgfile = join '-', ( qq{${\$status->pkgname}},
                               qq{${\$status->pkgver}},
                               ( $pkg_type eq q{bin}
-                                ? ( q{1}, qq{${\$status->pkgarch}.pkg.tar.gz} )
+                                ? ( q{1},
+                                    qq{${\$status->pkgarch}.pkg.tar.gz} )
                                 : q{1.src.tar.gz} )
                              );
 
     my $srcfile_fqp = $status->pkgbase . '/' . $module->package;
     my $pkgfile_fqp = $status->pkgbase . "/$pkgfile";
+
+    my $destdir = $opts{destdir} || $status->destdir;
+    $destdir = Cwd::abs_path( $destdir );
+    my $destfile_fqp = catfile( $destdir, $pkgfile );
 
     # Prepare our 'makepkg' package building directory,
     # namely the PKGBUILD and source tarball files...
@@ -312,6 +324,8 @@ Package type must be 'bin' or 'src'};
     # Wrap it up!
     chdir $status->pkgbase or die "chdir: $OS_ERROR";
     my $makepkg_cmd = join ' ', ( 'makepkg',
+                                  # XXX: should we force rebuilding?
+                                  #'-f',
                                   ( $EUID == 0         ? '--asroot'   : () ),
                                   ( $pkg_type eq 'src' ? '--source'   : () ),
                                   ( !$opts{verbose}    ? '>/dev/null' : () ),
@@ -323,13 +337,12 @@ Package type must be 'bin' or 'src'};
     if ($CHILD_ERROR) {
         error ( $CHILD_ERROR & 127
                 ? sprintf "makepkg failed with signal %d", $CHILD_ERROR & 127
-                : sprintf "makepkg returned abnormal status: %d", $CHILD_ERROR >> 8
+                : sprintf "makepkg returned abnormal status: %d",
+                          $CHILD_ERROR >> 8
                );
         return 0;
     }
 
-    my $destdir = $opts{destdir} || $status->destdir;
-    my $destfile_fqp = catfile( $destdir, $pkgfile );
     if ( ! rename $pkgfile_fqp, $destfile_fqp ) {
         error "failed to move $pkgfile to $destfile_fqp: $OS_ERROR";
         return 0;
@@ -365,23 +378,29 @@ END_ERROR
 
     die "Package file $pkgfile_fqp was not found" if ( ! -f $pkgfile_fqp );
 
+    my $pacmancmd;
+
     # Make sure the user has access to install a package...
     my $sudocmd = $conf->get_program('sudo');
     if ( $EFFECTIVE_USER_ID != $ROOT_USER_ID ) {
         if ( $sudocmd ) {
-            system "$sudocmd pacman -U $pkgfile_fqp";
+            $pacmancmd = "$sudocmd pacman -U $pkgfile_fqp";
         }
         else {
             error $NONROOT_WARNING;
             return 0;
         }
     }
-    else { system "pacman -U $pkgfile_fqp"; }
+    else { $pacmancmd = "pacman -U $pkgfile_fqp"; }
 
-    if ($CHILD_ERROR) {
+    system $pacmancmd;
+
+    if ( $CHILD_ERROR ) {
         error ( $CHILD_ERROR & 127
-                ? sprintf "pacman failed with signal %d",        $CHILD_ERROR & 127
-                : sprintf "pacman returned abnormal status: %d", $CHILD_ERROR >> 8
+                ? sprintf qq{'$pacmancmd' failed with signal %d},
+                          $CHILD_ERROR & 127
+                : sprintf qq{'$pacmancmd' returned abnormal status: %d},
+                          $CHILD_ERROR >> 8
                );
         return 0;
     }
@@ -389,9 +408,58 @@ END_ERROR
     return $status->installed(1);
 }
 
+
+#-------------------------------------------------------------------------------
+# EXPORTED FUNCTIONS
+#-------------------------------------------------------------------------------
+
+
+sub dist_pkgname
+{
+    croak "Must provide arguments to dist_pkgname" if ( @_ == 0 );
+    my ($distname) = @_;
+
+    # Override this package name if there is one specified...
+    return $PKGNAME_OVERRIDES->{$distname}
+        if $PKGNAME_OVERRIDES->{$distname};
+
+    # Package names should be lowercase and consist of alphanumeric
+    # characters only (and hyphens!)...
+    $distname =  lc $distname;
+    $distname =~ tr/_/-/;
+    $distname =~ tr/-a-z0-9//cd;
+    $distname =~ tr/-/-/s;
+
+    # Delete leading or trailing hyphens...
+    $distname =~ s/\A-//;
+    $distname =~ s/-\z//;
+
+    die qq{Dist name '$distname' completely violates packaging standards}
+        if ( ! $distname );
+
+    if ( $distname !~ / (?: \A perl ) | (?: -perl \z ) /xms ) {
+        $distname = "perl-$distname";
+    }
+
+    return $distname;
+}
+
+sub dist_pkgver
+{
+    croak "Must provide arguments to pacman_version" if ( @_ == 0 );
+    my ($version) = @_;
+
+    # Package versions should be letters, numbers and decimal points only...
+    $version =~ tr/_-/../s;
+    $version =~ tr/a-zA-Z0-9.//cd;
+    return $version;
+}
+
+
 #-------------------------------------------------------------------------------
 # PUBLIC METHODS
 #-------------------------------------------------------------------------------
+
 
 sub set_destdir
 {
@@ -407,6 +475,16 @@ sub get_destdir
     return $self->status->destdir;
 }
 
+sub get_cpandistdir
+{
+    my ($self) = @_;
+
+    my $module  = $self->parent;
+    my $distdir = $module->package;
+    $distdir    =~ s/ [.] ${\$module->package_extension} \z //xms;
+    return $distdir;
+}
+
 sub get_pkgvars
 {
     croak 'Invalid arguments to get_pkgvars' if ( @_ != 1 );
@@ -418,9 +496,10 @@ sub get_pkgvars
         unless ( $status->prepared );
 
     return ( pkgname  => $status->pkgname,
-             pkgver   => $status->pkgname,
+             pkgver   => $status->pkgver,
              pkgdesc  => $status->pkgdesc,
              depends  => scalar $self->_translate_cpan_deps,
+
              url      => $self->_get_disturl,
              source   => $self->_get_srcurl,
              md5sums  => $self->_calc_tarballmd5,
@@ -448,26 +527,15 @@ sub get_pkgbuild
     croak 'prepare() must be called before get_pkgbuild()'
         unless $status->prepared;
 
-    my $pkgdeps = $self->_translate_cpan_deps;
-    my $pkgdesc = $status->pkgdesc;
-    my $extdir  = $module->package;
-    $extdir     =~ s/ [.] ${\$module->package_extension} \z //xms;
-    $pkgdesc    =~ s/ ([\$\"\`\!]) / \\$1 /gxms; # Quote our package desc for bash.
+    my %pkgvars = $self->get_pkgvars;
+
+    # Quote our package desc for bash.
+    $pkgvars{pkgdesc} =~ s/ ([\$\"\`\!]) / \\$1 /gxms;
 
     my $templ_vars = { packager  => $PACKAGER,
                        version   => $VERSION,
-
-                       pkgname   => $status->pkgname,
-                       pkgver    => $status->pkgver,
-                       pkgdesc   => $pkgdesc,
-                       pkgdeps   => $pkgdeps,
-
-                       disturl   => $self->_get_disturl(),
-                       srcurl    => $self->_get_srcurl(),
-                       md5sum    => $self->_calc_tarballmd5(),
-
-                       distdir   => $extdir,
-
+                       %pkgvars,
+                       distdir   => $self->get_cpandistdir(),
                        skiptest  => $conf->get_conf('skiptest'),
                       };
 
@@ -502,61 +570,10 @@ Directory does not exist or is not writeable}
     return;
 }
 
+
 #-------------------------------------------------------------------------------
 # PRIVATE INSTANCE METHODS
 #-------------------------------------------------------------------------------
-
-#---INSTANCE METHOD---
-# Usage   : my $pkgname = $self->_translate_name($dist_name);
-# Purpose : Converts a module's dist[ribution tarball] name to an
-#           Archlinux style perl package name.
-# Params  : $dist_name - The name of the distribution (ex: Acme-Drunk)
-# Returns : The Archlinux perl package name (ex: perl-acme-drunk).
-#---------------------
-sub _translate_name
-{
-    croak "Invalid arguments to _translate_name method" if @_ != 2;
-    my ($self, $distname) = @_;
-
-    # Override this package name if there is one specified...
-    return $PKGNAME_OVERRIDES->{$distname}
-        if $PKGNAME_OVERRIDES->{$distname};
-
-    # Package names should be lowercase and consist of alphanumeric
-    # characters only (and hyphens!)...
-    $distname =  lc $distname;
-    $distname =~ tr/_/-/;
-    $distname =~ tr/-a-z0-9//cd;
-    $distname =~ tr/-/-/s;
-
-    # Delete leading or trailing hyphens...
-    $distname =~ s/\A-//;
-    $distname =~ s/-\z//;
-
-    die qq{Dist name '$distname' completely violates packaging standards}
-        if ( ! $distname );
-
-    if ( $distname !~ / (?: \A perl ) | (?: -perl \z ) /xms ) {
-        $distname = "perl-$distname";
-    }
-
-    return $distname;
-}
-
-#---INSTANCE METHOD---
-# Purpose  : Convert a module's CPAN distribution version into our more
-#            restrictive pacman package version number.
-#---------------------
-sub _translate_version
-{
-    croak "Invalid arguments to _translate_version method" if @_ != 2;
-    my ($self, $version) = @_;
-
-    # Package versions should be letters, numbers and decimal points only...
-    $version =~ tr/_-/../s;
-    $version =~ tr/a-zA-Z0-9.//cd;
-    return $version;
-}
 
 #---INSTANCE METHOD---
 # Usage    : my $deps_str = $self->_translate_cpan_deps()
@@ -587,23 +604,30 @@ sub _translate_cpan_deps
         }
 
         # Ignore modules included with this version of perl...
-        next CPAN_DEP_LOOP
-            if ( exists $Module::CoreList::version{0+$]}->{$modname} );
+        # XXX: This checks the version of perl being run, not necessarily
+        #      the latest perl version.
+        # NOTE: If 'provides' are given version numbers in the perl
+        #       package we won't need to check this.
+        my $bundled_version = $Module::CoreList::version{0+$]}->{$modname};
+        if ( defined $bundled_version ) {
+            next CPAN_DEP_LOOP if ( qv($bundled_version) >= qv($depver) );
+        }
 
         # Translate the module's distribution name into a package name...
-        my $modobj  = $backend->parse_module( module => $modname );
-        my $pkgname = $self->_translate_name( $modobj->package_name );
+        my $modobj  = $backend->parse_module( module => $modname )
+            or next CPAN_DEP_LOOP;
+        my $pkgname = dist_pkgname( $modobj->package_name );
 
-        $pkgdeps{$pkgname} = $self->_translate_version( $depver );
+        $pkgdeps{$pkgname} = ( $depver eq '0'
+                               ? $depver
+                               : dist_pkgver( $depver ) );
     }
 
-    # Default to requiring the current perl version used to compile
-    # the module if there is no explicit perl version required...
-    $pkgdeps{perl} ||= sprintf '%vd', $PERL_VERSION;
+    # Always require perl.
+    $pkgdeps{perl} ||= 0;
 
     # Merge in the XS C library package deps...
     my $xs_deps = $self->_translate_xs_deps;
-#    print STDERR Dumper($xs_deps);
 
     XSDEP_LOOP:
     while ( my ($name, $ver) = each %$xs_deps ) {
@@ -701,8 +725,10 @@ sub _prepare_pkgdesc
         $name_section =~ s{ [IBCLEFSXZ] <<(.*?)>> }{$1}gxms;
 
         # The short desc is on a line beginning with 'Module::Name - '
-        return $status->pkgdesc($pkgdesc)
-            if ( ($pkgdesc) = $name_section =~ / ^ \s* $modname [\s-]+ (.+?) $ /xms );
+        if ( ($pkgdesc) =
+             $name_section =~ / ^ \s* $modname [\s-]+ (.+?) $ /xms ) {
+            return $status->pkgdesc($pkgdesc);
+        }
     }
 
     # Last, try to find it in in the README file
@@ -747,14 +773,11 @@ sub _prepare_status
                            ( sprintf "%vd", $PERL_VERSION ),
                            'pacman' );
 
-    # Watchout if this was set explicitly with set_destdir() method
-    if ( !$status->destdir ) {
-        $status->destdir( $PKGDEST || catdir( $our_base, 'pkg' ) );
-    }
+    $status->destdir( $PKGDEST || catdir( $our_base, 'pkg' ) );
 
     my ($pkgver, $pkgname)
-        = ( $self->_translate_version($module->package_version),
-            $self->_translate_name($module->package_name) );
+        = (  dist_pkgver( $module->package_version ),
+            dist_pkgname( $module->package_name) );
 
     my $pkgbase = catdir( $our_base, 'build', "$pkgname-$pkgver" );
     my $pkgarch = `uname -m`;
@@ -872,11 +895,11 @@ END_ERR
     return ($before, $middle, $after);
 }
 
-#---HELPER FUNCTIONS---
+#---HELPER FUNCTION---
 # Purpose : Removes IF blocks whose variables are not true.
 # Params  : $templ      - The template as a string.
 #           $templ_vars - A hashref to template variables.
-#----------------------
+#---------------------
 sub _prune_if_blocks
 {
     my ($templ, $templ_vars) = @_;
@@ -901,14 +924,15 @@ sub _prune_if_blocks
 
 #---INSTANCE METHOD---
 # Usage    : $self->_process_template( $templ, $templ_vars );
-# Purpose  : Processes IF blocks and fills in a template with supplied variables.
+# Purpose  : Processes IF blocks and fills in a template with supplied
+#            variables.
 # Params   : templ       - A scalar variable containing the template
 #            templ_vars  - A hashref of template variables that you can refer to
 #                          in the template to insert the variable's value.
 # Throws   : 'Template variable %s was not provided' is thrown if a template
-#            variable is used in $templ but not provided in $templ_vars, or
-#            it is undefined.
-# Returns  : String of the template with all variables filled inserted.
+#            variable is used in $templ but not provided in $templ_vars,
+#            OR IF IT IS UNDEF!
+# Returns  : String of the template result.
 #---------------------
 sub _process_template
 {
@@ -929,15 +953,18 @@ sub _process_template
     return $templ;
 }
 
+
 #-----------------------------------------------------------------------------
 # XS module library dependency hunting
 #-----------------------------------------------------------------------------
+
 
 #---INSTANCE METHOD---
 # Usage    : $deps_ref = $self->_translate_cs_deps;
 # Purpose  : Attempts to find non-perl dependencies in XS modules.
 # Returns  : A hashref of 'package name' => 'minimum version'.
-#            (Minimum version will be the current installed version of the library)
+#            (Minimum version will be the current installed version
+#             of the library)
 #---------------------
 sub _translate_xs_deps
 {
@@ -954,7 +981,7 @@ sub _translate_xs_deps
                      $self->_get_mb_xs_deps($distcpan)     :
                      die qq{Unknown installer type "$inst_type"} );
 
-    # Turn the linker flags into libraries and packages
+    # Turn the linker flags into package deps...
     return +{ map { ($self->_get_lib_pkg($_)) }
               @$libs_ref };
 }
@@ -964,7 +991,8 @@ sub _translate_xs_deps
 # Params   : $lib - Can be a dynamic library name, with/without lib prefix
 #                   or the -l<name> flag that is passed to the linker.
 #                   (anything DynaLoader::dl_findfile accepts)
-# Returns  : A hash (or two element list) of 'package name' => 'installed version'
+# Returns  : A hash (or two element list) of:
+#            'package name' => 'installed version'
 #            or an empty list if the lib/package owner could not be found.
 #---------------------
 sub _get_lib_pkg
@@ -973,6 +1001,7 @@ sub _get_lib_pkg
 
     my $lib_fqp = DynaLoader::dl_findfile($libname)
         or return ();
+
     my $result = `pacman -Qo $lib_fqp`;
     chomp $result;
 
