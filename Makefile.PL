@@ -14,6 +14,7 @@ WriteMakefile
                            'Getopt::Long' => 0,
                            'File::Copy' => 0,
                            'Pod::Usage' => 0,
+                           'Net::Ping' => 0,
                            'IPC::Cmd' => 0,
                            'Carp' => 0,
                            'Test::More' => 0,
