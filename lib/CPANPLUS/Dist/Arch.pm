@@ -20,7 +20,7 @@ use English                qw(-no_match_vars);
 use Carp                   qw(carp croak);
 use Cwd                    qw();
 
-our $VERSION     = '0.15';
+our $VERSION     = '0.16';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our @EXPORT_TAGS = ( ':all' => \@EXPORT_OK );
@@ -124,8 +124,7 @@ build() {
 [% FI %]
   } || return 1;
 
-  find "$pkgdir" -name .packlist -delete
-  find "$pkgdir" -name perllocal.pod -delete
+  find "$pkgdir" -name .packlist -o -name perllocal.pod -delete
 }
 END_TEMPL
 
@@ -456,11 +455,11 @@ sub dist_pkgver
 
     # Package versions should be numbers and decimal points only...
     $version =~ tr/-/./;
-    $version =~ tr/0-9.-//cd;
+    $version =~ tr/_0-9.-//cd;
 
-    # Developer packages have a ##_## at the end though...
-    unless (( $version =~ tr/_/_/ == 1 ) && ( $version =~ /\d_\d/ )) {
-        $version =~ tr/_/./;
+    # Developer packages have a ..._## at the end though...
+    unless (( $version =~ tr/_/_/ == 1 ) && ( $version =~ /\d_\d+$/ )) {
+        $version =~ tr/_//d; # Delete underscores otherwise.
     }
 
     $version =~ tr/././s;
@@ -565,7 +564,7 @@ sub get_pkgbuild
     # Quote our package desc for bash.
     $pkgvars{pkgdesc} =~ s/ ([\$\"\`\!]) / \\$1 /gxms;
 
-    my $templ_vars = { packager  => $PACKAGER,
+    my $templ_vars = { packager  => $ENV{PACKAGER} || $PACKAGER,
                        version   => $VERSION,
                        %pkgvars,
                        distdir   => $self->get_cpandistdir(),
@@ -811,8 +810,8 @@ sub _prepare_status
                       catdir( $our_base, 'pkg' ) );
 
     my ($pkgver, $pkgname)
-        = (  dist_pkgver( $module->package_version ),
-            dist_pkgname( $module->package_name) );
+        = ( dist_pkgver( $module->package_version ),
+            dist_pkgname( $module->package_name));
 
     my $pkgbase = catdir( $our_base, 'build', "$pkgname-$pkgver" );
     my $pkgarch = `uname -m`;
@@ -1010,11 +1009,9 @@ sub _translate_xs_deps
     my $distcpan  = $modstat->dist_cpan;
 
     # Delegate to the other methods depending on the dist type...
-    my $libs_ref = ( $inst_type eq 'CPANPLUS::Dist::MM'    ?
-                     $self->_get_mm_xs_deps($distcpan)     :
-                     $inst_type eq 'CPANPLUS::Dist::Build' ?
-                     $self->_get_mb_xs_deps($distcpan)     :
-                     die qq{Unknown installer type "$inst_type"} );
+    my $libs_ref = ( $inst_type eq 'CPANPLUS::Dist::MM'
+                     ? $self->_get_mm_xs_deps($distcpan) : [] );
+    # TODO: figure out how to do this with Module::Build
 
     # Turn the linker flags into package deps...
     return +{ map { ($self->_get_lib_pkg($_)) }
@@ -1046,6 +1043,7 @@ sub _get_lib_pkg
     }
 
     my ($pkgname, $pkgver) = $result =~ /$PACMAN_FINDOWN/;
+    $pkgver =~ s/-\d+\z//; # remove the package revision number
     return ($pkgname => $pkgver);
 }
 
@@ -1075,21 +1073,6 @@ sub _get_mm_xs_deps
     close $mkfile;
 
     return [ grep { /\A-l/ } map { split } @libs ];
-}
-
-#---INSTANCE METHOD---
-# Usage    : my $deps_ref = $self->_get_mb_xs_deps($dist_obj);
-# Params   : $dist_obj - A CPANPLUS::Dist::Build object
-# Returns  : Arrayref of library flags (-l...) passed to the linker on build.
-#---------------------
-sub _get_mb_xs_deps
-{
-    my ($self, $dist) = @_;
-
-    my $mbobj = $dist->status->_mb_object;
-    my $linker_flags = $mbobj->extra_linker_flags;
-
-    return [ _unique grep { /\A-l/ } map { split } @{$linker_flags} ];
 }
 
 1; # End of CPANPLUS::Dist::Arch
