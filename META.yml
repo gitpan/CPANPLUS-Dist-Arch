@@ -1,15 +1,27 @@
 ---
-name: CPANPLUS-Dist-Arch
-version: 0.16
+abstract: 'CPANPLUS backend for building Archlinux pacman packages'
 author:
-  - 'Justin Davis <jrcd83@gmail.com>'
-abstract: CPANPLUS backend for building Archlinux pacman packages
+  - 'Justin Davis < juster at cpan dot org >'
+build_requires:
+  Net::Ping: 0
+  Test::More: 0
+configure_requires:
+  Module::Build: 0.36
+generated_by: 'Module::Build version 0.3603'
 license: perl
-resources:
-  repository: http://github.com/juster/perl-cpanplus-dist-arch
+meta-spec:
+  url: http://module-build.sourceforge.net/META-spec-v1.4.html
+  version: 1.4
+name: CPANPLUS-Dist-Arch
+provides:
+  CPANPLUS::Dist::Arch:
+    file: lib/CPANPLUS/Dist/Arch.pm
+    version: 0.17
 requires:
+  Archive::Tar: 0
   CPANPLUS: 0
   Carp: 0
+  Cwd: 0
   Digest::MD5: 0
   DynaLoader: 0
   File::Copy: 0
@@ -17,18 +29,15 @@ requires:
   File::Spec::Functions: 0
   File::stat: 0
   Getopt::Long: 0
+  IO::Zlib: 0
   IPC::Cmd: 0
   Module::CoreList: 0
+  POSIX: 0
   Pod::Select: 0
   Pod::Usage: 0
-build_requires:
-  Net::Ping: 0
-  Test::More: 0
-provides:
-  CPANPLUS::Dist::Arch:
-    file: lib/CPANPLUS/Dist/Arch.pm
-    version: 0.16
-generated_by: Module::Build version 0.280801
-meta-spec:
-  url: http://module-build.sourceforge.net/META-spec-v1.2.html
-  version: 1.2
+  Term::ANSIColor: 0
+  Text::Wrap: 0
+  version: 0
+resources:
+  repository: http://github.com/juster/perl-cpanplus-dist-arch
+version: 0.17

@@ -20,15 +20,15 @@ use English                qw(-no_match_vars);
 use Carp                   qw(carp croak);
 use Cwd                    qw();
 
-our $VERSION     = '0.16';
+our $VERSION     = '0.17';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our @EXPORT_TAGS = ( ':all' => \@EXPORT_OK );
 
 
-#----------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # CLASS CONSTANTS
-#----------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 
 my $MKPKGCONF_FQP = '/etc/makepkg.conf';
@@ -46,7 +46,6 @@ END_MSG
 # Patterns to use when using pacman for finding library owners.
 my $PACMAN_FINDOWN     = qr/\A[^ ]+ is owned by ([\w-]+) ([\w.-]+)/;
 my $PACMAN_FINDOWN_ERR = qr/\Aerror:/;
-
 
 # Override a package's name to conform to packaging guidelines.
 # Copied entries from CPANPLUS::Dist::Pacman and alot more
@@ -75,21 +74,6 @@ shorewall-perl = shorewall-perl
 
 END_OVERRIDES
 
-=for Mini-Template Format
-    The template format is very simple, to insert a template variable
-    use [% foo %].  This will insert the value of the variable
-    named 'foo'.
- 
-    The print_template() sub will throw: 'Template variable ... was
-    not provided' if the variable was not defined.
- 
-    [% IF var_name %] ... [% FI %] will remove the ... stuff if the
-    variable named var_name is not set to a true value.
- 
-    See the _process_template method below.
-
-=cut
-
 # Crude template for our PKGBUILD script
 my $PKGBUILD_TEMPL = <<'END_TEMPL';
 # Contributor: [% packager %]
@@ -107,14 +91,14 @@ source=('[% source %]')
 md5sums=('[% md5sums %]')
 
 build() {
-  _DISTDIR="${srcdir}/[% distdir %]"
+  DIST_DIR="${srcdir}/[% distdir %]"
   export PERL_MM_USE_DEFAULT=1
-  { cd "$_DISTDIR" &&
+  { cd "$DIST_DIR" &&
 [% IF is_makemaker %]
     perl Makefile.PL INSTALLDIRS=vendor &&
     make &&
     [% IF skiptest %]#[% FI %]make test &&
-    make DESTDIR="${pkgdir}/" install;
+    make DESTDIR="$pkgdir" install;
 [% FI %]
 [% IF is_modulebuild %]
     perl Build.PL --installdirs=vendor --destdir="$pkgdir" &&
@@ -141,8 +125,7 @@ problem.
 # CLASS GLOBALS
 #----------------------------------------------------------------------
 
-
-our ($PKGDEST, $PACKAGER);
+our ($Is_dependency, $PKGDEST, $PACKAGER);
 
 $PACKAGER = 'Anonymous';
 
@@ -181,9 +164,9 @@ READ_CONF:
 }
 
 
-#-------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # PUBLIC CPANPLUS::Dist::Base Interface
-#-------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 
 =for Interface Methods
@@ -219,7 +202,7 @@ sub init
 
     $self->status->mk_accessors( qw{ pkgname  pkgver  pkgbase pkgdesc
                                      pkgurl   pkgsize pkgarch
-                                     builddir destdir } );
+                                     builddir destdir pkgbuild_templ  } );
     return 1;
 }
 
@@ -297,6 +280,8 @@ Package type must be 'bin' or 'src'};
         my %resolve_args = map { ( exists $opts{$_}  ?
                                    ($_ => $opts{$_}) : () ) } @ok_resolve_args;
 
+        local $Is_dependency = 1; # only top level pkgs explicitly installed
+
         $distcpan->_resolve_prereqs( %resolve_args,
                                      'format'  => ref $self,
                                      'prereqs' => $module->status->prereqs );
@@ -331,29 +316,33 @@ Package type must be 'bin' or 'src'};
 
     # Package it up!
     local $ENV{PKGDEST} = $destdir;
+
+    my $oldcwd = Cwd::getcwd();
     chdir $status->pkgbase or die "chdir: $OS_ERROR";
-    my $makepkg_cmd = join ' ', ( 'makepkg',
-                                  # XXX: should we force rebuilding?
-                                  '-f',
-                                  ( $EUID == 0         ? '--asroot'   : () ),
-                                  ( $pkg_type eq 'src' ? '--source'   : () ),
-                                  ( !$opts{verbose}    ? '>/dev/null' : () ),
-                                 );
+    my $makepkg_cmd = join q{ }, ( 'makepkg',
+                                   '-f', # should we force rebuilding?
+                                   ( $EUID == 0         ? '--asroot'  : () ),
+                                   ( $pkg_type eq 'src' ? '--source'  : () ),
+                                   ( $opts{nocolor}     ? '--nocolor' : () ),
+                                   ( $opts{quiet}       ? '2>&1 >/dev/null'
+                                                        : () ),
+                                  );
 
     # I tried to use IPC::Cmd here, but colors didn't work...
     system $makepkg_cmd;
 
-    if ($CHILD_ERROR) {
+    if ( $CHILD_ERROR ) {
         error ( $CHILD_ERROR & 127
                 ? sprintf "makepkg failed with signal %d", $CHILD_ERROR & 127
                 : sprintf "makepkg returned abnormal status: %d",
-                          $CHILD_ERROR >> 8
-               );
+                          $CHILD_ERROR >> 8 );
         return 0;
     }
 
-    $status->dist($destfile_fqp);
-    return $status->created(1);
+    chdir $oldcwd or die "chdir: $OS_ERROR";
+
+    $status->dist( $destfile_fqp );
+    return $status->created( 1 );
 }
 
 #---INTERFACE METHOD---
@@ -382,29 +371,31 @@ END_ERROR
 
     die "Package file $pkgfile_fqp was not found" if ( ! -f $pkgfile_fqp );
 
-    my $pacmancmd;
+    my @pacmancmd = ( 'pacman', '-U', $pkgfile_fqp,
+                      ( $Is_dependency ? '--asdeps' : '--asexplicit' ),
+                     );
 
     # Make sure the user has access to install a package...
     my $sudocmd = $conf->get_program('sudo');
     if ( $EFFECTIVE_USER_ID != $ROOT_USER_ID ) {
         if ( $sudocmd ) {
-            $pacmancmd = "$sudocmd pacman -U $pkgfile_fqp";
+            unshift @pacmancmd, $sudocmd;
+#            $pacmancmd = "$sudocmd pacman -U $pkgfile_fqp";
         }
         else {
             error $NONROOT_WARNING;
             return 0;
         }
     }
-    else { $pacmancmd = "pacman -U $pkgfile_fqp"; }
 
-    system $pacmancmd;
+    system @pacmancmd;
 
     if ( $CHILD_ERROR ) {
         error ( $CHILD_ERROR & 127
-                ? sprintf qq{'$pacmancmd' failed with signal %d},
-                          $CHILD_ERROR & 127
-                : sprintf qq{'$pacmancmd' returned abnormal status: %d},
-                          $CHILD_ERROR >> 8
+                ? sprintf qq{'@pacmancmd' failed with signal %d},
+                  $CHILD_ERROR & 127
+                : sprintf qq{'@pacmancmd' returned abnormal status: %d},
+                  $CHILD_ERROR >> 8
                );
         return 0;
     }
@@ -413,9 +404,9 @@ END_ERROR
 }
 
 
-#-------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # EXPORTED FUNCTIONS
-#-------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 
 sub dist_pkgname
@@ -480,9 +471,9 @@ sub dist_pkgver
 =cut
 
 
-#-------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # PUBLIC METHODS
-#-------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 
 sub set_destdir
@@ -547,6 +538,20 @@ sub get_pkgvars_ref
     return { $self->get_pkgvars };
 }
 
+sub set_pkgbuild_templ
+{
+    my ($self, $template) = @_;
+
+    return $self->status->pkgbuild_templ( $template );
+}
+
+sub get_pkgbuild_templ
+{
+    my ($self) = @_;
+
+    return $self->status->pkgbuild_templ() || $PKGBUILD_TEMPL;
+}
+
 sub get_pkgbuild
 {
     croak 'Invalid arguments to get_pkgbuild' if ( @_ < 1 );
@@ -577,8 +582,9 @@ sub get_pkgbuild
           $dist_type eq 'CPANPLUS::Dist::Build' ? (0, 1) :
           die "unknown Perl module installer type: '$dist_type'" );
 
-    return scalar $self->_process_template( $PKGBUILD_TEMPL,
-                                            $templ_vars );
+    my $templ_text = $status->pkgbuild_templ || $PKGBUILD_TEMPL;
+
+    return scalar $self->_process_template( $templ_text, $templ_vars );
 }
 
 sub create_pkgbuild
@@ -603,9 +609,9 @@ Directory does not exist or is not writeable}
 }
 
 
-#-------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 # PRIVATE INSTANCE METHODS
-#-------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
 
 #---INSTANCE METHOD---
 # Usage    : my $deps_str = $self->_translate_cpan_deps()
@@ -711,6 +717,10 @@ sub _prepare_pkgdesc
             if ( ($pkgdesc) = /^abstract:\s*(.+)/) {
                 $pkgdesc = $1 if ( $pkgdesc =~ /\A'(.*)'\z/ );
                 close $metayml;
+
+                # Descriptions of ~ pop up in metafiles, rarely...
+                last METAYML if $pkgdesc eq '~';
+
                 return $status->pkgdesc($pkgdesc);
             }
         }
@@ -757,10 +767,9 @@ sub _prepare_pkgdesc
         $name_section =~ s{ [IBCLEFSXZ] <<(.*?)>> }{$1}gxms;
 
         # The short desc is on a line beginning with 'Module::Name - '
-        if ( ($pkgdesc) =
-             $name_section =~ / ^ \s* $modname [\s-]+ (.+?) $ /xms ) {
-            return $status->pkgdesc($pkgdesc);
-        }
+        return $status->pkgdesc($pkgdesc)
+            if ($pkgdesc) =
+                $name_section =~ / ^ \s* $modname [ -]+ ([^\n]+) /xms;
     }
 
     # Last, try to find it in in the README file
@@ -775,11 +784,9 @@ sub _prepare_pkgdesc
             chomp;
             if ( (/^NAME/ ... /^[A-Z]+/) # limit ourselves to a NAME section
                  && ( ($pkgdesc) = / ^ \s* ${modname} [\s\-]+ (.+) $ /oxms) ) {
-                close $readme;
                 return $status->pkgdesc($pkgdesc);
             }
         }
-        close $readme;
     }
 
     return $status->pkgdesc(q{});
@@ -833,7 +840,8 @@ sub _prepare_status
 
 #---INSTANCE METHOD---
 # Usage    : my $pkgurl = $self->_get_disturl()
-# Purpose  : Creates a nice, version agnostic homepage URL for the distribution.
+# Purpose  : Creates a nice, version agnostic homepage URL for the
+#            distribution.
 # Returns  : URL to the distribution's web page on CPAN.
 #---------------------
 sub _get_disturl
@@ -885,8 +893,8 @@ sub _calc_tarballmd5
 }
 
 #---HELPER FUNCTION---
-# Purpose : Split the text into everything before the tags, inside tags, and after
-#           the tags.  Inner nested tags are skipped.
+# Purpose : Split the text into everything before the tags, inside tags, and
+#           after the tags.  Inner nested tags are skipped.
 #---------------------
 sub _extract_nested
 {
