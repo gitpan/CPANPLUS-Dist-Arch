@@ -38,8 +38,6 @@ my $NEED_LOGIN_MSG = 'You must create an account before you can upload packages.
 my $PKG_EXISTS_MSG = qr{You are not allowed to overwrite the <b>.*?</b> package.};
 my $CFGPATH        = "$ENV{HOME}/.cpan2aur";
 
-sub error;
-
 my $NEED_LOGIN_ERR = 'Login session was invalid.';
 my $PKG_EXISTS_ERR = 'You tried to submit a package you do not own.';
 
@@ -50,30 +48,41 @@ my ($DIRECTORY, $VERBOSE, $UPLOAD, $FORCE, $HELP, $NAME,
 ## UTILITY FUNCTIONS
 ##############################################################################
 
+# Params : @questions - Questions to concatenate and print together.
+# Returns: The answer! (sans newline)
 sub prompt_ask
 {
+    my $question = join q{}, @_;
+    chomp $question;
+    $question .= q{ };
+
     local $OUTPUT_AUTOFLUSH = 1;
-    printf '    %s ', shift;
+    my $prefix = q{ } x 4;
+    print wrap( $prefix, $prefix, $question );
+
     my $line = <STDIN>;
     chomp $line;
     return $line;
 }
 
-# Params: $message - Yes or no question to ask user.
-#         $default - Whether 'yes' or 'no' is the default.
+# Params: $question - Yes or no question to ask user.
+#         $default  - Whether 'yes' or 'no' is the default.
+#                     (default for $default is Yes!)
+# Returns: 1 for yes 0 for no
 sub prompt_yn
 {
-    die 'Invalid arguments to prompt_yn' unless ( @_ == 2 );
-    my ($message, $default) = @_;
+    my ($question, $default) = @_;
+    $default ||= 'y';
 
     my $first = lc substr $default, 0, 1;
     $default = ( $first eq 'y' ? 1 : $first eq 'n' ? 0 : 1 );
-    
-    $message .= q{ } . ( $default ? '[Yn]' : '[yN]' );
+
+    chomp $question;
+    $question .= q{ } . ( $default ? '[Yn]' : '[yN]' );
 
     my $answer;
     QUESTION: {
-        $answer = prompt_ask( $message );
+        $answer = prompt_ask( $question );
 
         return $default if ( length $answer == 0 );
         redo QUESTION unless $answer =~ /\A[yYnN]/;
@@ -105,10 +114,11 @@ sub prompt_password
 
 sub _color_wrap
 {
-    my ($color, $prefix, $msg) = @_;
+    my ($color, $prefix, @messages) = @_;
 
     # Wrap the uncolored first because ANSI color chars mess up wrap()
     # (it doesn't know the ANSI color codes are invisible)
+    my $msg          = join q{}, @messages;
     $msg             =~ s/\s*\n\s*/ /g;
     my $result       = wrap( $prefix, q{ } x length( $prefix ), $msg );
     my $prefix_match = quotemeta $prefix;
@@ -126,31 +136,31 @@ sub _color_wrap
 sub msg
 {
     my $prefix = q{ } x 4;
-    print wrap( $prefix, $prefix, shift ), "\n";
+    print wrap( $prefix, $prefix, join q{}, @_ ), "\n";
 }
 
 sub status
 {
-    print _color_wrap( 'GREEN' => q{==> }, shift ), "\n";
+    print _color_wrap( 'GREEN' => q{==> }, @_ ), "\n";
 }
 
 sub substatus
 {
-    print _color_wrap( 'BLUE' => q{  -> }, shift ), "\n";
+    print _color_wrap( 'BLUE' => q{  -> }, @_ ), "\n";
 }
 
 sub warning
 {
-    my $msg = shift;
-    chomp $msg;
-    warn _color_wrap( 'YELLOW' => q{==> WARNING: }, $msg ), "\n";
+    my @args = @_;
+    chomp $args[-1];
+    warn _color_wrap( 'YELLOW' => q{==> WARNING: }, @args ), "\n";
 }
 
 sub error
 {
-    my $msg = shift;
-    chomp $msg;
-    die _color_wrap( 'RED' => q{==> ERROR: }, $msg ), "\n";
+    my @args = @_;
+    chomp $args[-1];
+    die _color_wrap( 'RED' => q{==> ERROR: }, @args ), "\n";
 }
 
 sub pkgdir
@@ -237,6 +247,8 @@ sub create_dist_arch
                                                })
         or die "Failed to create CPANPLUS::Dist::Arch object";
 
+    $dist_obj->set_tt_init_args( RELATIVE => 1 );
+
     return $dist_obj;
 }
 
@@ -262,12 +274,13 @@ There is no PKGBUILD in the directory and no file or module names specified on
 the command line.  Unable to upload anything.
 END_ERR
 
-        substatus "Running makepkg...";
-        my $output = `makepkg --source --force --clean 2>&1`;
+        my $makepkg_cmd = 'makepkg --source --force --clean';
+        substatus qq{Running '$makepkg_cmd'...};
+        my $output = `$makepkg_cmd 2>&1`;
 
         # We can only parse the output of makepkg to find the filename...
         my @pkginfo = $output =~ /Making package: ([\w-]+) ([\d.-]+)/
-            or error( "makepkg returned unexpected output" );
+            or error( "makepkg returned unexpected output: $output" );
 
         $pkgpath = ( join q{-}, @pkginfo ) . '.src.tar.gz';
     };
@@ -640,24 +653,63 @@ END_ERR
 sub tt_to_pkgbuild
 {
     substatus "Converting PKGBUILD.tt template to PKGBUILD...";
-    return unless confirm_overwrite( 'PKGBUILD' );
+
+    my %old_info;
+    if ( -f 'PKGBUILD' ) {
+        # Save the old PKGBUILD's pkgrel and pkgver for later...
+        open my $pkgbuild_file, '<', 'PKGBUILD' or die "open PKGBUILD: $!";
+        my $pkgbuild_txt = do { local $/; <$pkgbuild_file> };
+        close $pkgbuild_file;
+
+        %old_info = get_pkgbuild_info( $pkgbuild_txt );
+
+        # Warn if the user doesn't generate a new PKGBUILD...
+        unless ( confirm_overwrite( 'PKGBUILD' )) {
+            warning( 'Skipping template and doing a simple re-package...' );
+            return;
+        }
+    }
 
     open my $templ_file, '<', 'PKGBUILD.tt' or die "open PKGBUILD.tt: $!";
-    my ($distname) = ( scalar <$templ_file> ) =~ /^$TT_NAME_PREFIX(.*)$/;
+    my $templ_text = do { local $/; <$templ_file> };
+    close $templ_file or die "close PKGBUILD.tt: $!";
+
+    # Convert old template format to new TT-compatible format...
+    $templ_text =~ s/ [[] % \s* FI \s* % []] /[% END %]/gxms;
+
+    my ($distname) = $templ_text =~ /^$TT_NAME_PREFIX(.*)$/m;
     error( qq{"$TT_NAME_PREFIX" line is missing from the
 PKGBUILD.tt template.  This template file may not have been generated by
 cpan2aur.
 
 In order to use this .tt file with cpan2aur, insert the CPAN distribution's
 name into the file prefixed with the above comment in quotes.
-} ) unless $distname;
-    
-    my $templ_text = do { local $/; <$templ_file> };
-    close $templ_file or die "close PKGBUILD.tt: $!";
+} ) unless ( $distname );
 
     # Create a CPANPLUS::Dist::Arch object to convert the template to PKGBUILD
     my $modobj  = find_module( $distname );
     my $distobj = create_dist_arch( $modobj => 'prepare' );
+
+    # If the last PKGBUILD has the same version as the to-be-generated one
+    # then increment the pkgrel.
+    REL_CHECK:
+    {
+        last REL_CHECK unless ( $old_info{pkgver} );
+        
+        my $old_ver = version->new( $old_info{pkgver}   );
+        my $new_ver = version->new( $distobj->get_pkgver );
+
+        last REL_CHECK unless ( $old_ver == $new_ver );
+
+        my $new_pkgrel = $old_info{pkgrel} + 1;
+
+        my $answer = prompt_yn( <<"END_QUESTION" );
+A PKGBUILD already exists for this version ($new_ver).
+Would you like to increment the pkgrel to $new_pkgrel?
+END_QUESTION
+        
+        $distobj->set_pkgrel( $answer ? $new_pkgrel : $old_info{pkgrel} );
+    }
 
     $distobj->set_pkgbuild_templ( $templ_text );
     $distobj->create_pkgbuild( q{.} );
@@ -670,12 +722,20 @@ name into the file prefixed with the above comment in quotes.
 
 sub get_pkgbuild_info
 {
-    my ($pkgbuild) = @_;
+    my ($pkgbuild_txt) = @_;
 
-    my ($dist_name, $dist_ver) = $pkgbuild
+    my ($dist_name, $dist_ver) = $pkgbuild_txt
         =~ m{ DIST_DIR="\${srcdir}/ ( [\w-]+ ) - ( [\d.]+ ) /? " }xms;
 
-    return ($dist_name, $dist_ver);
+    my ($pkgrel) = $pkgbuild_txt
+        =~ m{ ^ pkgrel = ['"]? ( \d+ ) ['"]? }xms;
+
+    my ($pkgver) = $pkgbuild_txt
+        =~ m{ ^ pkgver = ['"]? ( [-._0-9]+ ) }xms;
+
+    return ( dist_name => $dist_name, dist_ver => $dist_ver,
+             pkgrel    => $pkgrel,    pkgver   => $pkgver,
+            );
 }
 
 sub get_pkgfile_info
@@ -693,32 +753,36 @@ sub get_pkgfile_info
         unless $pkg_file->contains_file( "$pkg_name/PKGBUILD" );
 
     my $pkgbuild = $pkg_file->get_content( "$pkg_name/PKGBUILD" );
-    my ($dist_name, $dist_ver) = get_pkgbuild_info( $pkgbuild );
+    my %info     = get_pkgbuild_info( $pkgbuild );
 
-    error( <<'END_ERROR' ) unless ( $dist_name && $dist_ver );
+    error( <<'END_ERROR' ) unless ( $info{dist_name} );
 $pkg_path's PKGBUILD does not seem to be made by cpan2aur.
 We are unable to extract the CPAN distribution name from it.
 END_ERROR
 
-    return ($dist_name, $dist_ver);
+    return %info;
+}
+
+sub pkgdir_srcpkg
+{
+    my ($pkg_dir) = @_;
+
+    my ($pkg_name) = reverse splitdir( $pkg_dir )
+        or error( "Failed to extract pkgname from dir $pkg_dir" );
+
+    # Choose the package with the latest version number...
+    my ($src_pkgpath) = reverse sort glob "$pkg_dir/$pkg_name-*.src.tar.gz";
+
+    return $src_pkgpath;
 }
 
 sub get_pkgdir_info
 {
     my ($pkg_dir) = @_;
 
-    my ($dist_name, $dist_ver);
-
-    # A source package file in the package dir has the highest precedence...
-    my ($pkg_name) = reverse splitdir( $pkg_dir )
-        or error( "Failed to extract pkgname from dir $pkg_dir" );
-
-    # Choose the package with the latest version number...
-    my ($srcpkg) = reverse sort glob "$pkg_dir/$pkg_name-*.src.tar.gz";
-
-    if ( $srcpkg ) {
-        return get_pkgfile_info( $srcpkg );
-    }
+    # Return a source package file's info if one exists in the dir...
+    my $srcpkg = pkgdir_srcpkg( $pkg_dir );
+    return get_pkgfile_info( $srcpkg ) if ( $srcpkg );
 
     # Next is the PKGBUILD file itself...
     error( "$pkg_dir does not contain a PKGBUILD or source package file." )
@@ -729,17 +793,17 @@ sub get_pkgdir_info
     my $pkgbuild = do { local $/; <$pkgbuild_file> }; # slurp!
     close $pkgbuild_file;
 
-    ($dist_name, $dist_ver) = get_pkgbuild_info( $pkgbuild );
+    my %info = get_pkgbuild_info( $pkgbuild );
 
-    error( <<'END_ERROR' ) unless ( $dist_name && $dist_ver );
+    error( <<'END_ERROR' ) unless ( $info{dist_name} );
 $pkg_dir/PKGBUILD does not seem to be made by cpan2aur.
 We are unable to extract the CPAN distribution name from it.
 END_ERROR
 
-    return ($dist_name, $dist_ver);
+    return %info;
 }
 
-sub upload_if_old
+sub update_if_old
 {
     my ($thing) = @_;
 
@@ -753,15 +817,15 @@ END_ERROR
     }
 
     # Check if the "thing" has a newer version on CPAN...
-    my ($dist_name, $dist_ver) = ( $type eq 'file' ? get_pkgfile_info( $thing ) :
-                                   $type eq 'dir'  ? get_pkgdir_info( $thing )  :
-                                   die );
+    my %pkg_info = ( $type eq 'file' ? get_pkgfile_info( $thing ) :
+                     $type eq 'dir'  ? get_pkgdir_info( $thing )  :
+                     die );
 
-    my $mod_obj  = find_module( $dist_name );
+    my $mod_obj  = find_module( $pkg_info{ dist_name } );
     return unless ( $mod_obj );
 
     my $cpan_ver = version->new( dist_pkgver( $mod_obj->version ));
-    $dist_ver    = version->new( $dist_ver );
+    my $dist_ver = version->new( $pkg_info{ dist_ver }           );
 
     if ( $cpan_ver < $dist_ver ) {
         error( <<"END_WARN" );
@@ -778,6 +842,11 @@ END_WARN
         my $dist_obj = create_dist_arch( $mod_obj => 'create' );
         my $pkg_path = $dist_obj->status->dist
             or die 'Unable to find path of created source package';
+
+        if ( prompt_yn( 'Delete the old package file?' => 'yes' )) {
+            status "Deleting old package file: $thing";
+            unlink $thing or warning( "Failed to delete $thing ($!)" );
+        }
         upload_pkgfile( $pkg_path );
         return;
     }
@@ -802,7 +871,7 @@ GetOptions( 'directory' => \$DIRECTORY,
             'help'      => \$HELP,
            );
 
-$VERBOSE //= 0;
+$VERBOSE ||= 0;
 
 pod2usage( -message => '-u[pload] and -d[irectory cannot be used together' )
     if ( $UPLOAD && $DIRECTORY );
@@ -825,7 +894,7 @@ if ( $UPLOAD && !@ARGV ) {
 pod2usage( -verbose => 0 ) unless ( @ARGV );
 
 # A list of actions, each is an aref of arg test and arg action.
-my @flagacts = ( [ sub { $CHECK     }, \&upload_if_old     ],
+my @flagacts = ( [ sub { $CHECK     }, \&update_if_old     ],
                  [ sub { $UPLOAD    }, \&upload_thing      ],
                  [ sub { $DIRECTORY }, \&create_new_pkgdir ],
                  [ sub { -d shift   }, \&create_pkgdir_pkg ],

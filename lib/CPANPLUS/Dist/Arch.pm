@@ -10,17 +10,18 @@ use Module::CoreList       qw();
 use CPANPLUS::Error        qw(error msg);
 use Digest::MD5            qw();
 use Pod::Select            qw();
-use File::Path             qw(mkpath);
+use List::Util             qw(first);
+use File::Path             qw(make_path);
 use File::Copy             qw(copy);
 use File::stat             qw(stat);
 use DynaLoader             qw();
 use IPC::Cmd               qw(can_run);
 use version                qw(qv);
 use English                qw(-no_match_vars);
-use Carp                   qw(carp croak);
+use Carp                   qw(carp croak confess);
 use Cwd                    qw();
 
-our $VERSION     = '0.18';
+our $VERSION     = '0.19';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our @EXPORT_TAGS = ( ':all' => \@EXPORT_OK );
@@ -42,6 +43,10 @@ In order to install packages as a non-root user (highly recommended)
 you must have a sudo-like command specified in your CPANPLUS
 configuration.
 END_MSG
+
+# META.yml abstract entries we should ignore.
+my @BAD_METAYML_ABSTRACTS
+    = ( q{~}, 'Module abstract (<= 44 characters) goes here' );
 
 # Patterns to use when using pacman for finding library owners.
 my $PACMAN_FINDOWN     = qr/\A[^ ]+ is owned by ([\w-]+) ([\w.-]+)/;
@@ -74,13 +79,17 @@ shorewall-perl = shorewall-perl
 
 END_OVERRIDES
 
+# This var tells us whether to use a template module or our internal code:
+my $TT_MOD_NAME;
+my @TT_MOD_SEARCH = qw/ Template Template::Alloy Template::Tiny /;
+
 # Crude template for our PKGBUILD script
 my $PKGBUILD_TEMPL = <<'END_TEMPL';
 # Contributor: [% packager %]
 # Generator  : CPANPLUS::Dist::Arch [% version %]
 pkgname='[% pkgname %]'
 pkgver='[% pkgver %]'
-pkgrel='1'
+pkgrel='[% pkgrel %]'
 pkgdesc="[% pkgdesc %]"
 arch=('i686' 'x86_64')
 license=('PerlArtistic' 'GPL')
@@ -97,15 +106,15 @@ build() {
 [% IF is_makemaker %]
     perl Makefile.PL INSTALLDIRS=vendor &&
     make &&
-    [% IF skiptest %]#[% FI %]make test &&
+    [% IF skiptest %]#[% END %]make test &&
     make DESTDIR="$pkgdir" install;
-[% FI %]
+[% END %]
 [% IF is_modulebuild %]
     perl Build.PL --installdirs=vendor --destdir="$pkgdir" &&
     perl Build &&
-    [% IF skiptest %]#[% FI %]perl Build test &&
+    [% IF skiptest %]#[% END %]perl Build test &&
     perl Build install;
-[% FI %]
+[% END %]
   } || return 1;
 
   find "$pkgdir" -name .packlist -o -name perllocal.pod -delete
@@ -125,9 +134,28 @@ problem.
 # CLASS GLOBALS
 #----------------------------------------------------------------------
 
-our ($Is_dependency, $PKGDEST, $PACKAGER);
+our ($Is_dependency, $PKGDEST, $PACKAGER, $DEBUG);
 
 $PACKAGER = 'Anonymous';
+
+sub _DEBUG
+{
+    print STDERR '***DEBUG*** ', @_, "\n" if $DEBUG;
+}
+
+#---HELPER FUNCTION---
+# Purpose: Expand environment variables and tildes like bash would.
+#---------------------
+sub _shell_expand
+{
+    my $dir = shift;
+    $dir =~ s/ \A ~             / $ENV{HOME}      /xmse;  # tilde = homedir
+    $dir =~ s/ (?<!\\) \$ (\w+) / $ENV{$1} || q{} /xmseg; # expand env vars
+    $dir =~ s/ \\ [a-zA-Z]      /                 /xmsg;
+    $dir =~ s/ \\ (.)           / $1              /xmsg;  # escaped special
+                                                          # chars
+    return $dir;
+}
 
 READ_CONF:
 {
@@ -144,21 +172,17 @@ READ_CONF:
     my $cfg_field_match = sprintf $CFG_VALUE_MATCH,
         join '|', keys %cfg_vars;
 
+    CFG_LINE:
     while (<$mkpkgconf>) {
         chomp;
-        if ( my ($name, $value) = /$cfg_field_match/xmso ) {
-            ${$cfg_vars{$name}} =
-                ( $value =~ m/\A"(.*)"\z/ ?
-                  do {
-                      $value = $1;
-                      $value =~ tr/\\//d;
-                      $value;
-                  } :
+        next CFG_LINE unless ( my ($name, $value) = /$cfg_field_match/xmso );
 
-                  $value =~ m/\A'(.*)'\z/ ? $1 :
-
-                  $value );
-        }
+        ${ $cfg_vars{$name} } =
+            ( $value =~ m/\A"(.*)"\z/
+              ? _shell_expand( $1 ) # expand double quotes
+              : ( $value =~ m/\A'(.*)'\z/
+                  ? $1              # dont single quotes
+                  : _shell_expand( $value )));
     }
     close $mkpkgconf or error "close on makepkg.conf: $!";
 }
@@ -201,8 +225,11 @@ sub init
     my $self = shift;
 
     $self->status->mk_accessors( qw{ pkgname  pkgver  pkgbase pkgdesc
-                                     pkgurl   pkgsize pkgarch
-                                     builddir destdir pkgbuild_templ  } );
+                                     pkgurl   pkgsize pkgarch pkgrel
+                                     builddir destdir
+
+                                     pkgbuild_templ tt_init_args } );
+
     return 1;
 }
 
@@ -247,16 +274,15 @@ sub create
                                                  # CPANPLUS::Dist::Build
 
     # Create directories for building and delivering the new package.
+    MKDIR_LOOP:
     for my $dir ( $status->pkgbase, $status->destdir ) {
         if ( -e $dir ) {
-            die "$dir exists but is not a directory!" if ( ! -d _ );
-            die "$dir exists but is read-only!"       if ( ! -w _ );
+            die "$dir exists but is not a directory!" unless ( -d _ );
+            die "$dir exists but is read-only!"       unless ( -w _ );
+            next MKDIR_LOOP;
         }
-        else {
-            mkpath $dir
-                or die qq{failed to create directory '$dir': $OS_ERROR};
-            if ( $opts{verbose} ) { msg "Created directory $dir" }
-        }
+
+        make_path( $dir, { verbose => $opts{verbose} ? 1 : 0 });
     }
 
     my $pkg_type = $opts{pkg} || $opts{pkgtype} || 'bin';
@@ -507,6 +533,28 @@ sub get_cpandistdir
     return $distdir;
 }
 
+sub get_pkgname
+{
+    return shift->status->pkgname;
+}
+
+sub get_pkgver
+{
+    return shift->status->pkgver;
+}
+
+sub get_pkgrel
+{
+    my ($self) = @_;
+    return $self->status->pkgrel;
+}
+
+sub set_pkgrel
+{
+    my ($self, $new_pkgrel) = @_;
+    return $self->status->pkgrel( $new_pkgrel );
+}
+
 sub get_pkgvars
 {
     croak 'Invalid arguments to get_pkgvars' if ( @_ != 1 );
@@ -519,6 +567,7 @@ sub get_pkgvars
 
     return ( pkgname  => $status->pkgname,
              pkgver   => $status->pkgver,
+             pkgrel   => $status->pkgrel,
              pkgdesc  => $status->pkgdesc,
              depends  => scalar $self->_translate_cpan_deps,
 
@@ -536,6 +585,23 @@ sub get_pkgvars_ref
 
     my $self = shift;
     return { $self->get_pkgvars };
+}
+
+sub set_tt_init_args
+{
+    my $self = shift;
+
+    croak 'set_tt_init_args() must be given a hash as an argument'
+        unless @_ % 2 == 0;
+
+    return $self->status->tt_init_args( { @_ } );
+}
+
+sub get_tt_module
+{
+    _load_tt_module() unless defined $TT_MOD_NAME;
+
+    return $TT_MOD_NAME;
 }
 
 sub set_pkgbuild_templ
@@ -670,8 +736,7 @@ sub _translate_cpan_deps
             next CPAN_DEP_LOOP unless _is_main_module( $modname, $pkgname );
         }
 
-        $pkgdeps{$pkgname} = ( $depver eq '0' ? $depver
-                               : dist_pkgver( $depver ) );
+        $pkgdeps{$pkgname} = ( qv($depver) == 0 ? 0 : dist_pkgver( $depver ));
     }
 
     # Always require perl.
@@ -696,6 +761,132 @@ sub _translate_cpan_deps
              sort keys %pkgdeps );
 }
 
+#---HELPER FUNCTION---
+sub _metayml_pkgdesc
+{
+    my ($mod_obj) = @_;
+    my $metayml;
+
+    unless ( open $metayml, '<',
+             catfile( $mod_obj->status->extract, 'META.yml' )) {
+        _DEBUG( "Could not open META.yml to get pkgdesc: $!" );
+        return undef;
+    }
+
+    while ( <$metayml> ) {
+        chomp;
+        if ( my ($pkgdesc) = / \A abstract: \s* (.+) \s* \z /xms ) {
+            _DEBUG qq{Found pkgdesc "$pkgdesc" in META.yml};
+
+            # Ignore enclosing quotes...
+            $pkgdesc = $2 if ( $pkgdesc =~ / \A (['"]) (.*) \1 \z /xms );
+
+            # Ignore certain values we don't like...
+            for my $bad ( @BAD_METAYML_ABSTRACTS ) {
+                return undef if $pkgdesc eq $bad;
+            }
+
+            return $pkgdesc;
+        }
+    }
+
+    return undef;
+}
+
+#---HELPER FUNCTION---
+sub _pod_pkgdesc
+{
+    my ($mod_obj) = @_;
+    my $podselect = Pod::Select->new;
+    my $modname   = $mod_obj->name;
+    $podselect->select('NAME');
+
+=for POD Search
+    We use the package name because there is usually a module file
+    with the exact same name as the package file.
+    
+    We want the main module's description, just in case the user requested
+    a lesser module in the same package file.
+    
+    Assume the main .pm or .pod file is under lib/Module/Name/Here.pm
+=cut
+
+    my $mainmod_path = $mod_obj->package_name;
+    $mainmod_path    =~ tr{-}{/}s;
+
+    my $mainmod_file = $mainmod_path;
+    $mainmod_file    =~ s{\A.*/}{};
+    $mainmod_path    =~ s{/$mainmod_file}{};
+
+    my $base_path = $mod_obj->status->extract;
+
+    my @possible_pods = (# check directly inside the extracted folder
+                         # and deep inside the lib directory
+                         map { ( catfile( $base_path, 'lib', $_ ),
+                                 catfile( $base_path, $_ )) }
+                         map { ( catfile( $mainmod_path, $_ ), $_ ) }
+                         # .pm files and .pod files
+                         map { "${mainmod_file}.$_" }
+                         qw/pod pm/ );
+
+    PODSEARCH:
+    for my $podfile_path ( @possible_pods ) {
+        next PODSEARCH unless ( -e $podfile_path );
+
+        _DEBUG "Searching the POD inside $podfile_path for pkgdesc...";
+
+        my $name_section = q{};
+
+        open my $podfile, '<', $podfile_path
+            or next PODSEARCH;
+
+        open my $podout, '>', \$name_section
+            or die "failed open on filehandle to string: $!";
+        $podselect->parse_from_filehandle( $podfile, $podout );
+
+        close $podfile;
+        close $podout or die "failed close on filehandle to string: $!";
+
+        next PODSEARCH unless ( $name_section );
+
+        # Remove formatting codes.
+        $name_section =~ s{ [IBCLEFSXZ]  <(.*?)>  }{$1}gxms;
+        $name_section =~ s{ [IBCLEFSXZ] <<(.*?)>> }{$1}gxms;
+
+        # The short desc is on a line beginning with 'Module::Name - '
+        if ( $name_section =~ / ^ \s* $modname [ -]+ ([^\n]+) /xms ) {
+            _DEBUG qq{Found pkgdesc "$1" in POD};            
+            return $1;
+        }
+    }
+
+    return undef;
+}
+
+#---HELPER FUNCTION---
+sub _readme_pkgdesc
+{
+    my ($mod_obj) = @_;
+    my $mod_name  = $mod_obj->name;
+
+    open my $readme, '<', catfile( $mod_obj->status->extract, 'README' )
+        or return undef;
+
+    LINE:
+    while ( <$readme> ) {
+        chomp;
+
+        # limit ourselves to a NAME section
+        next LINE unless ( (/^NAME/ ... /^[A-Z]+/) &&
+                           / ^ \s* ${mod_name} [\s\-]+ (.+) $ /oxms );
+        
+        _DEBUG qq{Found pkgdesc "$1" in README};
+        return $1;
+    }
+
+    return undef;
+}
+
 #---INSTANCE METHOD---
 # Usage    : $pkgdesc = $self->_prepare_pkgdesc();
 # Purpose  : Tries to find a module's "abstract" short description for
@@ -709,100 +900,32 @@ sub _translate_cpan_deps
 sub _prepare_pkgdesc
 {
     croak 'Invalid arguments to _prepare_pkgdesc method' if @_ != 1;
+
     my ($self) = @_;
     my ($status, $module, $pkgdesc) = ($self->status, $self->parent);
 
-    # Registered modules have their description stored in the object.
-    return $status->pkgdesc( $module->description )
-        if ( $module->description );
+    my @pkgdesc_srcs =
+        (
+         # Registered modules have their description stored in the object.
+         sub { $module->description },
 
-    # First, try to find the short description in the META.yml file.
-    METAYML:
-    {
-        my $metayml;
-        unless ( open $metayml, '<', $module->status->extract().'/META.yml' ) {
-            #error "Could not open META.yml to get pkgdesc: $!";
-            last METAYML;
-        }
+         # First, try to find the short description in the META.yml file...
+         \&_metayml_pkgdesc,
+          
+         # Next, parse the source file or pod file for a NAME section...
+         \&_pod_pkgdesc,
 
-        while ( <$metayml> ) {
-            chomp;
-            if ( ($pkgdesc) = /^abstract:\s*(.+)/) {
-                $pkgdesc = $1 if ( $pkgdesc =~ /\A'(.*)'\z/ );
-                close $metayml;
+         # Last, try to find it in in the README file...
+         \&_readme_pkgdesc,
 
-                # Descriptions of ~ pop up in metafiles, rarely...
-                last METAYML if $pkgdesc eq '~';
+         );
 
-                return $status->pkgdesc($pkgdesc);
-            }
-        }
-        close $metayml;
+    PKGDESC_LOOP:
+    for my $pkgdesc_src ( @pkgdesc_srcs ) {
+        $pkgdesc = $pkgdesc_src->( $module ) and last PKGDESC_LOOP;
     }
 
-    # Next, parse the source file or pod file for a NAME section...
-    my $podselect = Pod::Select->new;
-    $podselect->select('NAME');
-    my $modname   = $module->name;
-
-    # We use the package name because there is usually a module file
-    # with the exact same name as the package file.
-    #
-    # We want the main module's description, just in case the user requested
-    # a lesser module in the same package file.
-    #
-    # Assume the main .pm or .pod file is under lib/Module/Name/Here.pm
-    my $mainmod_file = $module->package_name;
-
-    $mainmod_file =~ tr{-}{/}s;
-    $mainmod_file = catfile( $module->status->extract, 'lib', $mainmod_file );
-
-    PODSEARCH:
-    for my $podfile_path ( map { "$mainmod_file.$_" } qw/pm pod/ ) {
-        my $name_section = '';
-
-        next PODSEARCH unless ( -e $podfile_path );
-        open my $podfile, '<', $podfile_path
-            or next PODSEARCH;
-
-        open my $podout, '>', \$name_section
-            or die "failed open on filehandle to string: $!";
-        $podselect->parse_from_filehandle( $podfile, $podout );
-
-        close $podfile;
-        close $podout
-            or die "failed close on filehandle to string: $!";
-
-        next PODSEARCH unless ($name_section);
-
-        # Remove formatting codes.
-        $name_section =~ s{ [IBCLEFSXZ]  <(.*?)>  }{$1}gxms;
-        $name_section =~ s{ [IBCLEFSXZ] <<(.*?)>> }{$1}gxms;
-
-        # The short desc is on a line beginning with 'Module::Name - '
-        return $status->pkgdesc($pkgdesc)
-            if ($pkgdesc) =
-                $name_section =~ / ^ \s* $modname [ -]+ ([^\n]+) /xms;
-    }
-
-    # Last, try to find it in in the README file
-    README:
-    {
-        open my $readme, '<', $module->status->extract . '/README'
-            or last README;
-        #   error( "Could not open README to get pkgdesc: $!" ), return undef;
-
-        my $modname = $module->name;
-        while ( <$readme> ) {
-            chomp;
-            if ( (/^NAME/ ... /^[A-Z]+/) # limit ourselves to a NAME section
-                 && ( ($pkgdesc) = / ^ \s* ${modname} [\s\-]+ (.+) $ /oxms) ) {
-                return $status->pkgdesc($pkgdesc);
-            }
-        }
-    }
-
-    return $status->pkgdesc(q{});
+    return $status->pkgdesc( $pkgdesc || q{} );
 }
 
 #---INSTANCE METHOD---
@@ -816,6 +939,7 @@ sub _prepare_pkgdesc
 sub _prepare_status
 {
     croak 'Invalid arguments to _prepare_status method' if @_ != 1;
+
     my $self     = shift;
     my $status   = $self->status; # Private hash
     my $module   = $self->parent; # CPANPLUS::Module
@@ -841,10 +965,13 @@ sub _prepare_status
         die "A package variable is invalid" unless defined;
     }
 
-    $status->pkgname($pkgname);
-    $status->pkgver ($pkgver );
-    $status->pkgbase($pkgbase);
-    $status->pkgarch($pkgarch);
+    $status->pkgname( $pkgname );
+    $status->pkgver ( $pkgver  );
+    $status->pkgbase( $pkgbase );
+    $status->pkgarch( $pkgarch );
+    $status->pkgrel (    1     );
+
+    $status->tt_init_args( {} );
 
     $self->_prepare_pkgdesc();
 
@@ -959,7 +1086,7 @@ sub _prune_if_blocks
 {
     my ($templ, $templ_vars) = @_;
 
-    while ( my ($varname) = $templ =~ /\[%\s*IF (\w*)\s*%\]/ ) {
+    while ( my ($varname) = $templ =~ /\[%\s+IF\s+(\w+)\s+%\]/ ) {
         croak 'Invalid template given, must provide a variable name in IF block'
             unless ( $varname );
 
@@ -967,8 +1094,8 @@ sub _prune_if_blocks
             unless ( exists $templ_vars->{$varname} );
 
         my @chunks = _extract_nested( $templ,
-                                      qr/\[% IF \w+ %\]\n?/,
-                                      qr/\[% FI %\]\n?/ );
+                                      qr/\[%\s+IF\s+\w+\s+%\]\n?/,
+                                      qr/\[%\s+END\s+%\]\n?/ );
 
         if ( ! $templ_vars->{$varname} ) { splice @chunks, 1, 1; }
         $templ = join q{}, @chunks;
@@ -977,13 +1104,65 @@ sub _prune_if_blocks
     return $templ;
 }
 
+#---HELPER FUNCTION---
+# Purpose  : Load a template module and store its name for later use.
+# Postcond : Stores the template name into $TT_MOD_NAME.
+# Returns  : Nothing.
+#---------------------
+sub _load_tt_module
+{
+    _DEBUG "Searching for template modules...";
+    TT_SEARCH:
+    for my $ttmod ( @TT_MOD_SEARCH ) {
+        eval "require $ttmod; 1;" or next TT_SEARCH;
+        _DEBUG "Loaded template module: $ttmod";
+        $TT_MOD_NAME = $ttmod;
+        return;
+    }
+
+    _DEBUG "None found!";
+    $TT_MOD_NAME = 0;
+    return;
+}
+
+#---HELPER METHOD---
+# Purpose : Create our template module object and process our template text.
+# Params  : $templ      - A string of template text.
+#           $templ_vars - A hashref of template variable names and their
+#                         values.
+# Returns : The template module's processed text.
+#-------------------
+sub _tt_process
+{
+    my ($self, $templ, $templ_vars) = @_;
+
+    confess 'Internal Error: $TT_MOD_NAME not set' unless $TT_MOD_NAME;
+
+    _DEBUG "Processing template using $TT_MOD_NAME";
+
+    my ($tt_obj, $tt_output, $tt_init_args);
+    $tt_init_args = $self->status->tt_init_args();
+    $tt_output    = q{};
+    $tt_obj       = $TT_MOD_NAME->new( $TT_MOD_NAME eq 'Template'
+                                       ? $tt_init_args : %$tt_init_args );
+                                # TT takes a hashref, others take the hash
+
+    $tt_obj->process( \$templ, $templ_vars, \$tt_output );
+
+    croak "$TT_MOD_NAME failed to process PKGBUILD template:\n"
+        . $tt_obj->error if ( eval { $tt_obj->error } );
+
+    return $tt_output;
+}
+
 #---INSTANCE METHOD---
 # Usage    : $self->_process_template( $templ, $templ_vars );
-# Purpose  : Processes IF blocks and fills in a template with supplied
-#            variables.
-# Params   : templ       - A scalar variable containing the template
-#            templ_vars  - A hashref of template variables that you can refer to
-#                          in the template to insert the variable's value.
+# Purpose  : Process template text with a template module or our builtin
+#            template code.
+# Params   : templ       - A string containing the template text.
+#            templ_vars  - A hashref of template variables that you can
+#                          refer to in the template to insert the
+#                          variable's value.
 # Throws   : 'Template variable %s was not provided' is thrown if a template
 #            variable is used in $templ but not provided in $templ_vars,
 #            OR IF IT IS UNDEF!
@@ -991,14 +1170,22 @@ sub _prune_if_blocks
 #---------------------
 sub _process_template
 {
-    croak "Invalid arguments to _template_out" if @_ != 3;
+    croak "Invalid arguments to _process_template" if @_ != 3;
     my ($self, $templ, $templ_vars) = @_;
 
     croak 'templ_var parameter must be a hashref'
         if ( ref $templ_vars ne 'HASH' );
 
-    $templ = _prune_if_blocks( $templ, $templ_vars );
+    # Try to find a TT module if this is our first time called...
+    _load_tt_module() unless defined $TT_MOD_NAME;
 
+    # Use the TT module if we have found one earlier...
+    return $self->_tt_process( $templ, $templ_vars ) if $TT_MOD_NAME;
+
+    _DEBUG "Processing PKGBUILD template with built-in code...";
+
+    # Fall back on our own primitive little template engine...
+    $templ = _prune_if_blocks( $templ, $templ_vars );
     $templ =~ s{ \[% \s* (\w+) \s* %\] }
                { ( defined $templ_vars->{$1}
                    ? $templ_vars->{$1}
@@ -1059,7 +1246,8 @@ sub _get_lib_pkg
     chomp $result;
 
     if ( $result =~ /$PACMAN_FINDOWN_ERR/ ) {
-        error qq{Could not find owner of linked library "$libname", ignoring.};
+        error qq{Could not find owner of linked library }
+            . qq{"$libname", ignoring.};
         return ();
     }
 

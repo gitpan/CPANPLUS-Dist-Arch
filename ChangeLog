@@ -1,3 +1,41 @@
+2010-04-08  Justin Davis  <juster@cpan.org>
+
+	* lib/CPANPLUS/Dist/Arch.pm (get_tt_module): Added new method.
+
+2010-03-22  Justin Davis  <juster@cpan.org>
+
+	* lib/CPANPLUS/Dist/Arch.pm (_metayml_pkgdesc): Fix bug where the
+	abstract description inside the META.yml was left to its default
+	entry by a lazy module author.  This caused the pkgdesc to be:
+	Module abstract (<= 44 characters) goes here
+	Reported by Xenoterracide
+
+2010-03-03  Justin Davis  <juster@cpan.org>
+
+	* lib/CPANPLUS/Dist/Arch.pm (_prepare_pkgdesc): Fix bug where
+	pkgdesc is blank when the .pm/.pod file is in a non-standard
+	location.  We now search more places for the files.
+	Reported by Xenoterracide
+
+2010-02-21  Justin Davis  <juster@cpan.org>
+
+	* lib/CPANPLUS/Dist/Arch.pm (_shell_expand): Created helper
+	function for reading PKGDEST from /etc/makepkg.conf entries.
+	Fixed bug when PKGDEST in makepkg.conf contains environment
+	variables or tildes that need shell expansion.
+	Reported by Isaac Good
+	(_prepare_pkgdesc): Fix bug where META.yml contains double-quoted
+	text (not-single quotes) in the pkgdesc.  These double quotes
+	would not be removed and show up in the pkgdesc.
+
+2010-02-18  Justin Davis  <juster@cpan.org>
+
+	* lib/CPANPLUS/Dist/Arch.pm (get_pkgname): Added method.
+	(get_pkgver): Added method.
+	(get_pkgrel): Added method.
+	(set_pkgrel): Added method.
+	(get_pkgvars): Added 'pkgrel' as a new template variable.
+
 2010-02-17  Justin Davis  <juster@cpan.org>
 
 	* script/cpan2aur (confirm_overwrite): Fixed bug where the
