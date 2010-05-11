@@ -4,10 +4,6 @@
 
 CPANPLUS::Dist::Arch - CPANPLUS backend for building Archlinux pacman packages
 
-=head1 VERSION
-
-Version 0.20
-
 =head1 SYNOPSIS
 
   (First, setup cpan to use us automatically)
@@ -279,7 +275,7 @@ included in the examples directory for an example.
             Dependencies are converted to their pacman names.
  
             The keys are: pkgname, pkgver, pkgdesc, depends, url, source
-            md5sums (despite this name only one is given), depshash
+            md5sums (despite this name only one is given), depshash, arch
  
             One new key is 'depshash' whose value is a hashref.
             The hashref keys are packages and their values are

@@ -11,7 +11,7 @@ use CPANPLUS::Error        qw(error msg);
 use Digest::MD5            qw();
 use Pod::Select            qw();
 use List::Util             qw(first);
-use File::Path             qw(make_path);
+use File::Path  2.06_05    qw(make_path);
 use File::Copy             qw(copy);
 use File::stat             qw(stat);
 use DynaLoader             qw();
@@ -21,10 +21,10 @@ use English                qw(-no_match_vars);
 use Carp                   qw(carp croak confess);
 use Cwd                    qw();
 
-our $VERSION     = '0.20';
+our $VERSION     = '1.00';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
-our @EXPORT_TAGS = ( ':all' => \@EXPORT_OK );
+our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
 
 
 #-----------------------------------------------------------------------------
@@ -91,7 +91,7 @@ pkgname='[% pkgname %]'
 pkgver='[% pkgver %]'
 pkgrel='[% pkgrel %]'
 pkgdesc="[% pkgdesc %]"
-arch=('i686' 'x86_64')
+arch=('[% arch %]')
 license=('PerlArtistic' 'GPL')
 options=('!emptydirs')
 depends=([% depends %])
@@ -101,20 +101,27 @@ md5sums=('[% md5sums %]')
 
 build() {
   DIST_DIR="${srcdir}/[% distdir %]"
-  export PERL_MM_USE_DEFAULT=1
+  export PERL_AUTOINSTALL=--skipdeps PERL_MM_USE_DEFAULT=1 \
+[% IF is_makemaker -%]
+    PERL_MM_OPT="INSTALLDIRS=vendor DESTDIR='$pkgdir'"
+[% ELSE -%]
+    PERL_MB_OPT="--installdirs vendor --destdir '$pkgdir'" \
+    MODULEBUILDRC=/dev/null
+[% END -%]
+
   { cd "$DIST_DIR" &&
-[% IF is_makemaker %]
-    perl Makefile.PL INSTALLDIRS=vendor &&
+[% IF is_makemaker -%]
+    perl Makefile.PL &&
     make &&
     [% IF skiptest %]#[% END %]make test &&
-    make DESTDIR="$pkgdir" install;
-[% END %]
-[% IF is_modulebuild %]
-    perl Build.PL --installdirs=vendor --destdir="$pkgdir" &&
+    make install;
+[% END -%]
+[% IF is_modulebuild -%]
+    perl Build.PL &&
     perl Build &&
     [% IF skiptest %]#[% END %]perl Build test &&
     perl Build install;
-[% END %]
+[% END -%]
   } || return 1;
 
   find "$pkgdir" -name .packlist -o -name perllocal.pod -delete
@@ -137,12 +144,11 @@ problem.
 our ($Is_dependency, $PKGDEST, $PACKAGER, $DEBUG);
 
 $PACKAGER = 'Anonymous';
-$DEBUG    = $ENV{DIST_ARCH_DEBUG};
 
-sub _DEBUG
-{
-    print STDERR '***DEBUG*** ', @_, "\n" if $DEBUG;
-}
+sub _DEBUG;
+*_DEBUG = ( $ENV{DIST_ARCH_DEBUG}
+            ? sub { print STDERR '***DEBUG*** ', @_, "\n" }
+            : sub { return } );
 
 #---HELPER FUNCTION---
 # Purpose: Expand environment variables and tildes like bash would.
@@ -226,7 +232,7 @@ sub init
     my $self = shift;
 
     $self->status->mk_accessors( qw{ pkgname  pkgver  pkgbase pkgdesc
-                                     pkgurl   pkgsize pkgarch pkgrel
+                                     pkgurl   pkgsize arch    pkgrel
                                      builddir destdir
 
                                      pkgbuild_templ tt_init_args } );
@@ -273,7 +279,7 @@ sub _find_built_pkg
                              $status->pkgrel,
                              join '.',
                              ( $pkg_type eq q{bin}
-                               ? ( $status->pkgarch, 'pkg' )
+                               ? ( $status->arch, 'pkg' )
                                : 'src' ),
                              'tar',
                             ));
@@ -387,7 +393,9 @@ Package type must be 'bin' or 'src'};
 
     chdir $oldcwd or die "chdir: $OS_ERROR";
 
-    $status->dist( $self->_find_built_pkg( $pkg_type, $destdir ));
+    my $pkg_path = $self->_find_built_pkg( $pkg_type, $destdir );
+    $status->dist( $pkg_path );
+
     return $status->created( 1 );
 }
 
@@ -478,9 +486,9 @@ sub dist_pkgname
     die qq{Dist name '$distname' completely violates packaging standards}
         if ( ! $distname );
 
-    if ( $distname !~ / (?: \A perl ) | (?: -perl \z ) /xms ) {
-        $distname = "perl-$distname";
-    }
+    # Don't create a redundant 'perl-' prefix in the package name...
+    $distname = "perl-$distname"
+        unless ( $distname eq 'perl' || $distname =~ /\Aperl-/ );
 
     return $distname;
 }
@@ -588,6 +596,7 @@ sub get_pkgvars
     return ( pkgname  => $status->pkgname,
              pkgver   => $status->pkgver,
              pkgrel   => $status->pkgrel,
+             arch     => $status->arch,
              pkgdesc  => $status->pkgdesc,
              depends  => scalar $self->_translate_cpan_deps,
 
@@ -956,8 +965,7 @@ sub _prepare_pkgdesc
 # Usage    : $self->_prepare_status()
 # Purpose  : Prepares all the package-specific accessors in our $self->status
 #            accessor object (of the class Object::Accessor).
-# Postcond : Accessors assigned to: pkgname pkgver pkgbase pkgarch
-#                                   destdir
+# Postcond : Accessors assigned to: pkgname pkgver pkgbase arch destdir
 # Returns  : The object's status accessor.
 #---------------------
 sub _prepare_status
@@ -982,18 +990,16 @@ sub _prepare_status
             dist_pkgname( $module->package_name));
 
     my $pkgbase = catdir( $our_base, 'build', "$pkgname-$pkgver" );
-    my $pkgarch = `uname -m`;
-    chomp $pkgarch;
 
-    foreach ( $pkgname, $pkgver, $pkgbase, $pkgarch ) {
+    foreach ( $pkgname, $pkgver, $pkgbase ) {
         die "A package variable is invalid" unless defined;
     }
 
     $status->pkgname( $pkgname );
     $status->pkgver ( $pkgver  );
     $status->pkgbase( $pkgbase );
-    $status->pkgarch( $pkgarch );
     $status->pkgrel (    1     );
+    $status->arch   ( 'any'    );
 
     $status->tt_init_args( {} );
 
