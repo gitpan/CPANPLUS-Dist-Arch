@@ -21,7 +21,7 @@ use English                qw(-no_match_vars);
 use Carp                   qw(carp croak confess);
 use Cwd                    qw();
 
-our $VERSION     = '1.00';
+our $VERSION     = '1.01';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -83,6 +83,10 @@ END_OVERRIDES
 my $TT_MOD_NAME;
 my @TT_MOD_SEARCH = qw/ Template Template::Alloy Template::Tiny /;
 
+my $TT_IF_MATCH  = qr/ \[% -? \s* IF \s* (\w*) \s* -? %\] \n? /xms;
+my $TT_END_MATCH = qr/ \[% -? \s* END          \s* -? %\] \n? /xms;
+my $TT_VAR_MATCH = qr/ \[% -? \s* (\w+)        \s* -? %\] \n? /xms;
+
 # Crude template for our PKGBUILD script
 my $PKGBUILD_TEMPL = <<'END_TEMPL';
 # Contributor: [% packager %]
@@ -102,12 +106,9 @@ md5sums=('[% md5sums %]')
 build() {
   DIST_DIR="${srcdir}/[% distdir %]"
   export PERL_AUTOINSTALL=--skipdeps PERL_MM_USE_DEFAULT=1 \
-[% IF is_makemaker -%]
     PERL_MM_OPT="INSTALLDIRS=vendor DESTDIR='$pkgdir'"
-[% ELSE -%]
     PERL_MB_OPT="--installdirs vendor --destdir '$pkgdir'" \
     MODULEBUILDRC=/dev/null
-[% END -%]
 
   { cd "$DIST_DIR" &&
 [% IF is_makemaker -%]
@@ -1116,16 +1117,14 @@ sub _prune_if_blocks
 {
     my ($templ, $templ_vars) = @_;
 
-    while ( my ($varname) = $templ =~ /\[%\s+IF\s+(\w+)\s+%\]/ ) {
-        croak 'Invalid template given, must provide a variable name in IF block'
-            unless ( $varname );
+    while ( my ($varname) = $templ =~ $TT_IF_MATCH ) {
+        croak "Invalid template given.\n"
+            . 'Must provide a variable name in an IF block' unless $varname;
 
         croak "Unknown variable name in IF block: $varname"
             unless ( exists $templ_vars->{$varname} );
 
-        my @chunks = _extract_nested( $templ,
-                                      qr/\[%\s+IF\s+\w+\s+%\]\n?/,
-                                      qr/\[%\s+END\s+%\]\n?/ );
+        my @chunks = _extract_nested( $templ, $TT_IF_MATCH, $TT_END_MATCH );
 
         if ( ! $templ_vars->{$varname} ) { splice @chunks, 1, 1; }
         $templ = join q{}, @chunks;
@@ -1216,7 +1215,7 @@ sub _process_template
 
     # Fall back on our own primitive little template engine...
     $templ = _prune_if_blocks( $templ, $templ_vars );
-    $templ =~ s{ \[% \s* (\w+) \s* %\] }
+    $templ =~ s{ $TT_VAR_MATCH }
                { ( defined $templ_vars->{$1}
                    ? $templ_vars->{$1}
                    : croak "Template variable $1 was not provided" )
