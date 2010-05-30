@@ -21,7 +21,7 @@ use English                qw(-no_match_vars);
 use Carp                   qw(carp croak confess);
 use Cwd                    qw();
 
-our $VERSION     = '1.02';
+our $VERSION     = '1.03';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -76,6 +76,8 @@ Pango          = pango-perl
 XML-Parser     = perlxml0
 SDL_Perl       = sdl_perl
 shorewall-perl = shorewall-perl
+Perl-Critic    = perl-critic
+Perl-Tidy      = perl-tidy
 
 END_OVERRIDES
 
@@ -112,8 +114,9 @@ md5sums=('[% md5sums %]')
 
 build() {
   DIST_DIR="${srcdir}/[% distdir %]"
-  export PERL_AUTOINSTALL=--skipdeps PERL_MM_USE_DEFAULT=1 \
-    PERL_MM_OPT="INSTALLDIRS=vendor DESTDIR='$pkgdir'"
+  export PERL_MM_USE_DEFAULT=1 PERL5LIB=""                 \
+    PERL_AUTOINSTALL=--skipdeps                            \
+    PERL_MM_OPT="INSTALLDIRS=vendor DESTDIR='$pkgdir'"     \
     PERL_MB_OPT="--installdirs vendor --destdir '$pkgdir'" \
     MODULEBUILDRC=/dev/null
 
@@ -274,22 +277,36 @@ sub prepare
     return $self->SUPER::prepare(@_);
 }
 
-#---HELPER FUNCTION---
+#---PRIVATE METHOD---
+# Purpose : Finds the first package file that matches our internal data.
+#           (Meaning we might have built it)  We search for .tar.gz and
+#           .tar.xz files.
+# Note    : .tar.xz files have higher priority than .tar.gz files.
+# Params  : $pkg_type - Must be 'bin' or 'src'.
+#           $destdir  - The directory to search in for packages.
+# Returns : The absolute path of the found package
+#-------------------
 sub _find_built_pkg
 {
     my ($self, $pkg_type, $destdir) = @_;
     my $status = $self->status;
 
     my $pkgfile = catfile( $destdir,
-                           join '-',
-                           ( $status->pkgname,
-                             $status->pkgver,
-                             $status->pkgrel,
-                             join '.',
-                             ( $pkg_type eq q{bin}
-                               ? ( $status->arch, 'pkg' )
-                               : 'src' ),
-                             'tar',
+
+                           ( join q{.},
+
+                             ( join q{-},
+                               $status->pkgname,
+                               $status->pkgver,
+                               $status->pkgrel,
+                              
+                               ( $pkg_type eq q{bin}
+                                 ? $status->arch : qw// ),
+                              ),
+
+                             ( $pkg_type eq q{bin} ? q{pkg} : q{src} ),
+
+                             q{tar},
                             ));
 
     _DEBUG "Searching for file starting with $pkgfile";
@@ -494,9 +511,8 @@ sub dist_pkgname
     die qq{Dist name '$distname' completely violates packaging standards}
         if ( ! $distname );
 
-    # Don't create a redundant 'perl-' prefix in the package name...
-    $distname = "perl-$distname"
-        unless ( $distname eq 'perl' || $distname =~ /\Aperl-/ );
+    # Don't prefix the package with perl- if it IS perl...
+    $distname = "perl-$distname" unless ( $distname eq 'perl' );
 
     return $distname;
 }
@@ -638,8 +654,14 @@ sub set_tt_module
 {
     my ($self, $modname) = @_;
 
-    $TT_MOD_NAME = $modname || 0;
-    return $TT_MOD_NAME;
+    return ( $TT_MOD_NAME = 0 ) unless $modname;
+
+    croak qq{Failed to load template module "$modname"}
+        unless eval "require $modname; 1;";
+
+    _DEBUG "Loaded template module: $modname";
+
+    return $TT_MOD_NAME = $modname;
 }
 
 sub get_tt_module
