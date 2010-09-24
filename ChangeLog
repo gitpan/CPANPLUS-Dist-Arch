@@ -1,3 +1,20 @@
+2010-09-24  Justin Davis  <juster@cpan.org>
+
+	* lib/CPANPLUS/Dist/Arch.pm: Change PKGBUILD template to use
+	  the absolute path to the system perl interpreter.
+	  (install): Add --noconfirm flag to pacman arguments.
+
+2010-08-07  Justin Davis  <juster@cpan.org>
+
+	* lib/CPANPLUS/Dist/Arch.pm: Update name overrides to match
+	changed ArchLinux perl package names in official repos.
+
+2010-06-02  Justin Davis  <juster@cpan.org>
+
+	* t/05-custom_template.t: Fix bug where the packager was
+	hard-coded in our test output.
+	Reported by IsaacG
+
 2010-05-28  Justin Davis  <juster@cpan.org>
 
 	* RELEASE (1.03)
@@ -12,7 +29,7 @@
 	overrides to match Archlinux packages...
 
 	Fixes a bug with Perl::Version and version both translating to
-	perl-version.  Reported by xenoteracide
+	perl-version.  Reported by Xenoterracide
 
 2010-05-20  Justin Davis  <juster@cpan.org>
 

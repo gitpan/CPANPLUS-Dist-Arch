@@ -21,7 +21,7 @@ use English                qw(-no_match_vars);
 use Carp                   qw(carp croak confess);
 use Cwd                    qw();
 
-our $VERSION     = '1.04';
+our $VERSION     = '1.05';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -62,7 +62,6 @@ my $PKGNAME_OVERRIDES =
 libwww-perl    = perl-libwww
 glade-perl-two = perl-glade-two
 aceperl        = perl-ace
-
 Gnome2-GConf   = gconf-perl
 Gtk2-GladeXML  = glade-perl
 Glib           = glib-perl
@@ -73,11 +72,11 @@ Gtk2           = gtk2-perl
 XML-LibXML     = libxml-perl
 mod_perl       = mod_perl
 Pango          = pango-perl
-XML-Parser     = perlxml0
-SDL_Perl       = sdl_perl
-shorewall-perl = shorewall-perl
+SDL            = sdl_perl
 Perl-Critic    = perl-critic
 Perl-Tidy      = perl-tidy
+App-Ack        = ack
+TermReadKey    = perl-term-readkey
 
 END_OVERRIDES
 
@@ -113,6 +112,7 @@ source=('[% source %]')
 md5sums=('[% md5sums %]')
 
 build() {
+  PERL=/usr/bin/perl
   DIST_DIR="${srcdir}/[% distdir %]"
   export PERL_MM_USE_DEFAULT=1 PERL5LIB=""                 \
     PERL_AUTOINSTALL=--skipdeps                            \
@@ -122,16 +122,16 @@ build() {
 
   { cd "$DIST_DIR" &&
 [% IF is_makemaker -%]
-    perl Makefile.PL &&
+    $PERL Makefile.PL &&
     make &&
     [% IF skiptest %]#[% END %]make test &&
     make install;
 [% END -%]
 [% IF is_modulebuild -%]
-    perl Build.PL &&
-    perl Build &&
-    [% IF skiptest %]#[% END %]perl Build test &&
-    perl Build install;
+    $PERL Build.PL &&
+    $PERL Build &&
+    [% IF skiptest %]#[% END %]$PERL Build test &&
+    $PERL Build install;
 [% END -%]
   } || return 1;
 
@@ -450,7 +450,7 @@ END_ERROR
 
     die "Package file $pkgfile_fqp was not found" if ( ! -f $pkgfile_fqp );
 
-    my @pacmancmd = ( 'pacman', '-U', $pkgfile_fqp,
+    my @pacmancmd = ( 'pacman', '--noconfirm', '-U', $pkgfile_fqp,
                       ( $Is_dependency ? '--asdeps' : '--asexplicit' ),
                      );
 
