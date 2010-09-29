@@ -21,7 +21,7 @@ use English                qw(-no_match_vars);
 use Carp                   qw(carp croak confess);
 use Cwd                    qw();
 
-our $VERSION     = '1.05';
+our $VERSION     = '1.06';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -69,7 +69,6 @@ Gnome2         = gnome-perl
 Gnome2-VFS     = gnome-vfs-perl
 Gnome2-Canvas  = gnomecanvas-perl
 Gtk2           = gtk2-perl
-XML-LibXML     = libxml-perl
 mod_perl       = mod_perl
 Pango          = pango-perl
 SDL            = sdl_perl
