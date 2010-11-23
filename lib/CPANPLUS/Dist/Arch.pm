@@ -21,7 +21,7 @@ use English                qw(-no_match_vars);
 use Carp                   qw(carp croak confess);
 use Cwd                    qw();
 
-our $VERSION     = '1.06';
+our $VERSION     = '1.07';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -102,10 +102,11 @@ pkgname='[% pkgname %]'
 pkgver='[% pkgver %]'
 pkgrel='[% pkgrel %]'
 pkgdesc="[% pkgdesc %]"
-arch=('[% arch %]')
+arch=([% arch %])
 license=('PerlArtistic' 'GPL')
 options=('!emptydirs')
 depends=([% depends %])
+makedepends=([% makedepends %])
 url='[% url %]'
 source=('[% source %]')
 md5sums=('[% md5sums %]')
@@ -269,11 +270,11 @@ sub prepare
     my $distcpan = $module->status->dist_cpan;   # CPANPLUS::Dist::MM or
                                                  # CPANPLUS::Dist::Build
 
-    $self->_prepare_status;
-    $status->prepared(0);
-
     # Call CPANPLUS::Dist::Base's prepare to resolve our pre-reqs.
-    return $self->SUPER::prepare(@_);
+    $self->SUPER::prepare( @_ ) or return 0;
+
+    $self->_prepare_status;
+    return $status->prepared;
 }
 
 #---PRIVATE METHOD---
@@ -290,6 +291,14 @@ sub _find_built_pkg
     my ($self, $pkg_type, $destdir) = @_;
     my $status = $self->status;
 
+    my $arch = $self->status->arch;
+    if ( $arch eq q{'any'} ) {
+        $arch = 'any';
+    }
+    else {
+        chomp ( $arch = `uname -m` );
+    }
+
     my $pkgfile = catfile( $destdir,
 
                            ( join q{.},
@@ -299,8 +308,7 @@ sub _find_built_pkg
                                $status->pkgver,
                                $status->pkgrel,
                               
-                               ( $pkg_type eq q{bin}
-                                 ? $status->arch : qw// ),
+                               ( $pkg_type eq q{bin} ? $arch : qw// ),
                               ),
 
                              ( $pkg_type eq q{bin} ? q{pkg} : q{src} ),
@@ -363,8 +371,9 @@ Package type must be 'bin' or 'src'};
         # Use CPANPLUS::Dist::Base to make packages for pre-requisites...
         # (starts the packaging process for any missing ones)
         my @ok_resolve_args = qw/ verbose target force prereq_build /;
-        my %resolve_args = map { ( exists $opts{$_}  ?
-                                   ($_ => $opts{$_}) : () ) } @ok_resolve_args;
+        my %resolve_args    = ( map { ( exists $opts{$_}  ?
+                                        ($_ => $opts{$_}) : () ) }
+                                @ok_resolve_args );
 
         local $Is_dependency = 1; # only top level pkgs explicitly installed
 
@@ -606,6 +615,17 @@ sub set_pkgrel
     return $self->status->pkgrel( $new_pkgrel );
 }
 
+#---HELPER FUNCTION---
+# Converts a dependency hash into a dependency string for PKGBUILD
+sub _deps_string
+{
+    my ($deps_ref) = @_;
+    my %deps = %$deps_ref;
+    return ( join ' ',
+             map { $deps{$_} ? qq{'${_}>=$deps{$_}'} : qq{'$_'} }
+             sort keys %deps );
+}
+
 sub get_pkgvars
 {
     croak 'Invalid arguments to get_pkgvars' if ( @_ != 1 );
@@ -616,18 +636,22 @@ sub get_pkgvars
     croak 'prepare() must be called before get_pkgvars()'
         unless ( $status->prepared );
 
+    my $deps_ref = $self->_translate_cpan_deps;
+
     return ( pkgname  => $status->pkgname,
              pkgver   => $status->pkgver,
              pkgrel   => $status->pkgrel,
              arch     => $status->arch,
              pkgdesc  => $status->pkgdesc,
-             depends  => scalar $self->_translate_cpan_deps,
+
+             depends     => _deps_string( $deps_ref->{'depends'} ),
+             makedepends => _deps_string( $deps_ref->{'makedepends'} ),
 
              url      => $self->_get_disturl,
              source   => $self->_get_srcurl,
              md5sums  => $self->_calc_tarballmd5,
 
-             depshash => { $self->_translate_cpan_deps },
+             depshash => $deps_ref,
             );
 }
 
@@ -699,11 +723,8 @@ sub get_pkgbuild
     my %pkgvars = $self->get_pkgvars;
 
     # Quote our package desc for bash.
-    $pkgvars{pkgdesc} =~ s/ ([\$\"\`]) / \\$1 /gxms;
+    $pkgvars{pkgdesc} =~ s/ ([\$\"\`]) /\\$1/gxms;
     
-    # !'s are much more annoying...
-    $pkgvars{pkgdesc} =~ s/ \! /"'!'"/xms;
-
     my $templ_vars = { packager  => $ENV{PACKAGER} || $PACKAGER,
                        version   => $VERSION,
                        %pkgvars,
@@ -769,11 +790,15 @@ sub _translate_cpan_deps
         if @_ != 1;
     my ($self) = @_;
 
-    my %pkgdeps;
+    my (%pkgdeps, %makedeps);
 
     my $module  = $self->parent;
     my $backend = $module->parent;
     my $prereqs = $module->status->prereqs;
+
+    # Do not separate test modules into makedeps if we are ourself
+    # a test module.
+    my $wearetester = $module->package_name =~ /^Test-/;
 
     CPAN_DEP_LOOP:
     for my $modname ( keys %{$prereqs} ) {
@@ -783,15 +808,6 @@ sub _translate_cpan_deps
         if ( $modname eq 'perl' ) {
             $pkgdeps{perl} = $depver;
             next CPAN_DEP_LOOP;
-        }
-
-        # Ignore modules included with this version of perl...
-        # NOTE: If 'provides' are given version numbers in the perl
-        #       package we won't need to check this.
-        #       (But we still do, owell.  It avoids redundancy.)
-        my $bundled_version = $Module::CoreList::version{ 0+$] }->{$modname};
-        if ( defined $bundled_version ) {
-            next CPAN_DEP_LOOP if ( qv($bundled_version) >= qv($depver) );
         }
 
         # Translate the module's distribution name into a package name...
@@ -805,11 +821,15 @@ sub _translate_cpan_deps
             next CPAN_DEP_LOOP unless _is_main_module( $modname, $pkgname );
         }
 
-        $pkgdeps{$pkgname} = ( qv($depver) == 0 ? 0 : dist_pkgver( $depver ));
-    }
+        my $pkgver = ( qv($depver) == 0 ? 0 : dist_pkgver( $depver ));
 
-    # Always require perl.
-    $pkgdeps{perl} ||= 0;
+        if ( !$wearetester && $pkgname =~ /^perl-test-/ ) {
+            $makedeps{$pkgname} = $pkgver;
+        }
+        else {
+            $pkgdeps{$pkgname} = $pkgver;
+        }
+    }
 
     # Merge in the XS C library package deps...
     my $xs_deps = $self->_translate_xs_deps;
@@ -820,14 +840,11 @@ sub _translate_cpan_deps
         next XSDEP_LOOP if ( exists $pkgdeps{$name} );
         $pkgdeps{$name} = $ver;
     }
+    
+    # Require perl unless we have a dependency on a perl module or perl
+    $pkgdeps{perl} = 0 unless grep { /^perl/ } keys %pkgdeps;
 
-    # Return a hash if in list context or return a string representing
-    # the depends= line in the PKGBUILD if caller wants a scalar.
-    return %pkgdeps if ( wantarray );
-
-    return ( join ' ',
-             map { $pkgdeps{$_} ? qq{'${_}>=$pkgdeps{$_}'} : qq{'$_'} }
-             sort keys %pkgdeps );
+    return { depends => \%pkgdeps, makedepends => \%makedeps };
 }
 
 #---HELPER FUNCTION---
@@ -890,14 +907,12 @@ sub _pod_pkgdesc
 
     my $base_path = $mod_obj->status->extract;
 
-    my @possible_pods = (# check directly inside the extracted folder
-                         # and deep inside the lib directory
-                         map { ( catfile( $base_path, 'lib', $_ ),
-                                 catfile( $base_path, $_ )) }
-                         map { ( catfile( $mainmod_path, $_ ), $_ ) }
-                         # .pm files and .pod files
-                         map { "${mainmod_file}.$_" }
-                         qw/pod pm/ );
+    # First check under lib/ for a "properly" pathed module, with
+    # nested directories. Then search desperately for a .pm file that
+    # matches the module's last name component.
+
+    my @possible_pods = ( glob "$base_path/{lib/,}{$mainmod_path/,}"
+                             . "$mainmod_file.{pod,pm}" );
 
     PODSEARCH:
     for my $podfile_path ( @possible_pods ) {
@@ -947,14 +962,62 @@ sub _readme_pkgdesc
         chomp;
 
         # limit ourselves to a NAME section
-        next LINE unless ( (/^NAME/ ... /^[A-Z]+/) &&
-                           / ^ \s* ${mod_name} [\s\-]+ (.+) $ /oxms );
+        next LINE unless ( ( /^NAME/ ... /^[A-Z]+/ ) &&
+                          / ^ \s* ${mod_name} [\s\-]+ (.+) $ /oxms );
         
         _DEBUG qq{Found pkgdesc "$1" in README};
         return $1;
     }
 
     return undef;
+}
+
+#---HELPER FUNCTION---
+sub _find_xs_files
+{
+    my ($dirpath) = @_;
+    return -f "$dirpath/typemap" || scalar glob "$dirpath/*.xs";
+}
+
+#---PRIVATE METHOD---
+# Try to find out if this distribution has any XS files.
+# If it does, then the arch PKGBUILD field should be ('i686', 'x86_64').
+# If it doesn't, then the arch field should be ('any').
+sub _prepare_arch
+{
+    my ($self) = @_;
+
+    my $dist_cpan = $self->parent->status->dist_cpan;
+    my $dist_dir  = $dist_cpan->status->distdir;
+
+    unless ( $dist_dir && -d $dist_dir ) {
+        return $self->status->arch( q{'any'} );
+    }
+
+    # Only search the top distribution directory and then go
+    # one directory-level deep. .xs files are usually at the top
+    # or in a subdir. Don't use File::Find, that could be really slow.
+
+    my $found_xs;
+    if ( _find_xs_files( $dist_dir )) {
+        $found_xs = 1;
+    }
+    else {
+        opendir my $basedir, $dist_dir or die "opendir: $!";
+        my @childdirs = grep { !/^./ && -d $_ } readdir $basedir;
+
+        DIR_LOOP:
+        for my $childdir ( @childdirs ) {
+            next DIR_LOOP unless _find_xs_files( $childdir );
+            $found_xs = 1;
+            last DIR_LOOP;
+        }
+
+        closedir $basedir;
+    }
+
+    return $self->status->arch( $found_xs
+                                ? q{'i686' 'x86_64'} : q{'any'} );
 }
 
 #---INSTANCE METHOD---
@@ -1036,10 +1099,10 @@ sub _prepare_status
     $status->pkgver ( $pkgver  );
     $status->pkgbase( $pkgbase );
     $status->pkgrel (    1     );
-    $status->arch   ( 'any'    );
 
     $status->tt_init_args( {} );
 
+    $self->_prepare_arch();
     $self->_prepare_pkgdesc();
 
     return $status;
@@ -1287,8 +1350,7 @@ sub _translate_xs_deps
     # TODO: figure out how to do this with Module::Build
 
     # Turn the linker flags into package deps...
-    return +{ map { ($self->_get_lib_pkg($_)) }
-              @$libs_ref };
+    return +{ map { $self->_get_lib_pkg($_) } @$libs_ref };
 }
 
 #---INSTANCE METHOD---
