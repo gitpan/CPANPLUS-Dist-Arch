@@ -17,7 +17,7 @@ use version               qw();
 use POSIX                 qw();
 use Cwd                   qw(getcwd);
 
-our $VERSION = '1.01';
+our $VERSION = '1.02';
 
 ## CONSTANTS
 ##############################################################################
@@ -646,7 +646,8 @@ END_ERR
 
     # Also replace _DISTDIR or DIST_DIR if we are creating a template from
     # a C::D::A generated PKGBUILD...
-    $pkgbuild_txt =~ s{(DIST_|_DIST)DIR=".*?"}{DIST_DIR="\${srcdir}/[% distdir %]"};
+    $pkgbuild_txt =~ s{(DIST_|_DIST)DIR=".*?"}
+                      {DIST_DIR="\${srcdir}/[% distdir %]"};
     $pkgbuild_txt =~ s{\$_DISTDIR}{\$DIST_DIR}g;
     # Change _DISTDIR for backwards compatibility...
 
@@ -750,11 +751,13 @@ sub get_pkgbuild_info
             );
 }
 
+# Read PKGBUILD info from a compressed source package file.
 sub get_pkgfile_info
 {
     my ($pkg_path) = @_;
 
-    eval { require Archive::Tar; 1; };
+    eval { require Archive::Tar; 1; }
+        or error( "Failed to load Archive::Tar. Make sure it is installed." );
 
     my ($pkg_filename) = reverse splitpath( $pkg_path );
     my ($pkg_name)     = $pkg_filename =~ / \A ( [\w-]+ ) - \d /xms;
@@ -775,6 +778,15 @@ END_ERROR
     return %info;
 }
 
+sub by_version
+{
+    my ($aver) = $a =~ /-([^-]+)-\d+[.]src[.]tar[.]gz\z/
+        or die "Failed to extract version from $a.";
+    my ($bver) = $b =~ /-([^-]+)-\d+[.]src[.]tar[.]gz\z/
+        or die "Failed to extract version from $b.";
+    version->parse( $aver ) cmp version->parse( $bver );
+}
+
 sub pkgdir_srcpkg
 {
     my ($pkg_dir) = @_;
@@ -783,7 +795,8 @@ sub pkgdir_srcpkg
         or error( "Failed to extract pkgname from dir $pkg_dir" );
 
     # Choose the package with the latest version number...
-    my ($src_pkgpath) = reverse sort glob "$pkg_dir/$pkg_name-*.src.tar.gz";
+    my ($src_pkgpath) = reverse sort by_version
+        glob "$pkg_dir/$pkg_name-*.src.tar.gz";
 
     return $src_pkgpath;
 }
@@ -942,10 +955,6 @@ __END__
 
 cpan2aur - AUR maintainer utility for CPAN perl modules
 
-=head1 VERSION
-
-Version 1.0
-
 =head1 SYNOPSIS
 
  cpan2aur [-v -f] <Module::Names /pkg/dirs/>
@@ -982,6 +991,8 @@ Version 1.0
                        instead of the last one used.
  -p, --pass <password> Specify a password to use to login to AUR.
  -m, --mono            Disable color output, use monochrome black/white.
+ -i, --inc     <dir>   Rebuild the source package, incrementing the
+              <file>   release number.
 
  (Unlike GNU options, single-letter options need their own hyphens
   example: -u -d)
