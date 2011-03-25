@@ -2,37 +2,37 @@
 use ExtUtils::MakeMaker;
 WriteMakefile
 (
-          'NAME' => 'CPANPLUS::Dist::Arch',
-          'VERSION_FROM' => 'lib/CPANPLUS/Dist/Arch.pm',
-          'PREREQ_PM' => {
-                           'Archive::Tar' => 0,
-                           'CPANPLUS' => 0,
-                           'Carp' => 0,
-                           'Cwd' => 0,
-                           'Digest::MD5' => 0,
-                           'DynaLoader' => 0,
-                           'File::Copy' => 0,
-                           'File::Path' => '2.06_05',
-                           'File::Spec::Functions' => 0,
-                           'File::stat' => 0,
-                           'Getopt::Long' => 0,
-                           'IO::Zlib' => 0,
-                           'IPC::Cmd' => 0,
-                           'Module::CoreList' => 0,
-                           'Net::Ping' => 0,
-                           'POSIX' => 0,
-                           'Pod::Select' => 0,
-                           'Pod::Usage' => 0,
-                           'Term::ANSIColor' => 0,
-                           'Test::More' => 0,
-                           'Text::Wrap' => 0,
-                           'version' => 0
-                         },
+          'PL_FILES' => {},
           'INSTALLDIRS' => 'site',
+          'NAME' => 'CPANPLUS::Dist::Arch',
           'EXE_FILES' => [
                            'script/cpan2aur',
                            'script/setupdistarch'
                          ],
-          'PL_FILES' => {}
+          'VERSION_FROM' => 'lib/CPANPLUS/Dist/Arch.pm',
+          'PREREQ_PM' => {
+                           'Pod::Usage' => 0,
+                           'POSIX' => 0,
+                           'Text::Wrap' => 0,
+                           'Digest::MD5' => 0,
+                           'File::Path' => '2.06_05',
+                           'File::Spec::Functions' => 0,
+                           'DynaLoader' => 0,
+                           'Archive::Tar' => 0,
+                           'Pod::Select' => 0,
+                           'CPANPLUS' => 0,
+                           'Getopt::Long' => 0,
+                           'File::Copy' => 0,
+                           'Term::ANSIColor' => 0,
+                           'IO::Zlib' => 0,
+                           'version' => 0,
+                           'Net::Ping' => 0,
+                           'IPC::Cmd' => 0,
+                           'Carp' => 0,
+                           'Test::More' => 0,
+                           'Module::CoreList' => 0,
+                           'File::stat' => 0,
+                           'Cwd' => 0
+                         }
         )
 ;

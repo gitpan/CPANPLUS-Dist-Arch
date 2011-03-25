@@ -3,9 +3,14 @@ package CPANPLUS::Dist::Arch;
 use warnings;
 use strict;
 
-use CPANPLUS::Dist::Base qw();
-use Exporter             qw();
-our @ISA = qw(CPANPLUS::Dist::Base Exporter);
+use CPANPLUS::Dist::Base   qw();
+use Exporter               qw(import);
+
+our $VERSION     = '1.12';
+our @EXPORT      = qw();
+our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
+our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
+our @ISA         = qw(CPANPLUS::Dist::Base);
 
 use File::Spec::Functions  qw(catfile catdir);
 use Module::CoreList       qw();
@@ -13,7 +18,7 @@ use CPANPLUS::Error        qw(error msg);
 use Digest::MD5            qw();
 use Pod::Select            qw();
 use List::Util             qw(first);
-use File::Path  2.06_05    qw(make_path);
+use File::Path 2.06_05     qw(make_path);
 use File::Copy             qw(copy);
 use File::stat             qw(stat);
 use DynaLoader             qw();
@@ -22,12 +27,6 @@ use version                qw(qv);
 use English                qw(-no_match_vars);
 use Carp                   qw(carp croak confess);
 use Cwd                    qw();
-
-our $VERSION     = '1.11';
-our @EXPORT      = qw();
-our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
-our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
-
 
 #-----------------------------------------------------------------------------
 # CLASS CONSTANTS
@@ -117,28 +116,46 @@ makedepends=([% makedepends %])
 url='[% url %]'
 source=('[% source %]')
 md5sums=('[% md5sums %]')
+_distdir="${srcdir}/[% distdir %]"
 
 build() {
-  PERL=/usr/bin/perl
-  DIST_DIR="${srcdir}/[% distdir %]"
-  export PERL_MM_USE_DEFAULT=1 PERL5LIB=""                 \
-    PERL_AUTOINSTALL=--skipdeps                            \
-    PERL_MM_OPT="INSTALLDIRS=vendor DESTDIR='$pkgdir'"     \
-    PERL_MB_OPT="--installdirs vendor --destdir '$pkgdir'" \
-    MODULEBUILDRC=/dev/null
+  ( export PERL_MM_USE_DEFAULT=1 PERL5LIB=""                 \
+      PERL_AUTOINSTALL=--skipdeps                            \
+      PERL_MM_OPT="INSTALLDIRS=vendor DESTDIR='$pkgdir'"     \
+      PERL_MB_OPT="--installdirs vendor --destdir '$pkgdir'" \
+      MODULEBUILDRC=/dev/null
 
-  cd "$DIST_DIR"
+    cd "$_distdir"
 [% IF is_makemaker -%]
-  $PERL Makefile.PL
-  make
-  [% IF skiptest %]#[% END %]make test
+    /usr/bin/perl Makefile.PL
+    make
+[% END -%]
+[% IF is_modulebuild -%]
+    /usr/bin/perl Build.PL
+    /usr/bin/perl Build
+[% END -%]
+  )
+}
+
+check() {
+  cd "$_distdir"
+  ( export PERL_MM_USE_DEFAULT=1 PERL5LIB=""
+[% IF is_makemaker -%]
+    [% IF skiptest %]#[% END %]make test
+[% END -%]
+[% IF is_modulebuild -%]
+    [% IF skiptest %]#[% END %]/usr/bin/perl Build test
+[% END -%]
+  )
+}
+
+package() {
+  cd "$_distdir"
+[% IF is_makemaker -%]
   make install
 [% END -%]
 [% IF is_modulebuild -%]
-  $PERL Build.PL
-  $PERL Build
-  [% IF skiptest %]#[% END %]$PERL Build test
-  $PERL Build install
+  /usr/bin/perl Build install
 [% END -%]
 
   find "$pkgdir" -name .packlist -o -name perllocal.pod -delete
@@ -151,12 +168,15 @@ build() {
 # vim:set ts=2 sw=2 et:
 END_TEMPL
 
-=for Weird "perl Build" Syntax
-We use "perl Build" above instead of the normal "./Build" in order to
-make the yaourt packager happy.  Yaourt runs the PKGBUILD under the /tmp
-directory and makepkg will fail if /tmp is a seperate partition mounted
-with noexec.  Thanks to xenoterracide on the AUR for mentioning the
-problem.
+=for Weird "/usr/bin/perl Build" Syntax
+ We use "/usr/bin/perl Build" above instead of the normal "./Build" in
+ order to make the yaourt packager happy.  Yaourt runs the PKGBUILD
+ under the /tmp directory and makepkg will fail if /tmp is a seperate
+ partition mounted with noexec.  Thanks to xenoterracide on the AUR for
+ mentioning the problem.
+ 
+ We also use /usr/bin/perl to ensure running the system-wide perl
+ interpreter.
 
 =cut
 
@@ -164,7 +184,7 @@ problem.
 # CLASS GLOBALS
 #----------------------------------------------------------------------
 
-our ($Is_dependency, $PKGDEST, $PACKAGER, $DEBUG);
+our ($Is_dependency, $PKGDEST, $SRCPKGDEST, $PACKAGER, $DEBUG);
 
 $PACKAGER = 'Anonymous';
 
@@ -196,8 +216,9 @@ READ_CONF:
         last READ_CONF;
     }
 
-    my %cfg_vars = ( 'PKGDEST'  => \$PKGDEST,
-                     'PACKAGER' => \$PACKAGER );
+    my %cfg_vars = ( 'PKGDEST'    => \$PKGDEST,
+                     'SRCPKGDEST' => \$SRCPKGDEST,
+                     'PACKAGER'   => \$PACKAGER );
 
     my $cfg_field_match = sprintf $CFG_VALUE_MATCH,
         join '|', keys %cfg_vars;
@@ -308,7 +329,7 @@ sub _find_built_pkg
         $arch = 'any';
     }
     else {
-        chomp ( $arch = `uname -m` );
+        chomp( $arch = `uname -m` );
     }
 
     my $pkgfile = catfile( $destdir,
@@ -319,7 +340,7 @@ sub _find_built_pkg
                                $status->pkgname,
                                $status->pkgver,
                                $status->pkgrel,
-                              
+
                                ( $pkg_type eq q{bin} ? $arch : qw// ),
                               ),
 
@@ -330,9 +351,7 @@ sub _find_built_pkg
 
     _DEBUG "Searching for file starting with $pkgfile";
 
-    my ($found) =
-        ( grep { -f $_ }
-          map { "$pkgfile.$_" } qw/ xz gz / );
+    my ($found) = grep { -f $_ } map { "$pkgfile.$_" } qw/ xz gz bz2 /;
 
     _DEBUG ( $found ? "Found $found" : "No package file found!" );
 
@@ -352,18 +371,6 @@ sub create
     my $conf     = $intern->configure_object;    # CPANPLUS::Configure
     my $distcpan = $module->status->dist_cpan;   # CPANPLUS::Dist::MM or
                                                  # CPANPLUS::Dist::Build
-
-    # Create directories for building and delivering the new package.
-    MKDIR_LOOP:
-    for my $dir ( $status->pkgbase, $status->destdir ) {
-        if ( -e $dir ) {
-            die "$dir exists but is not a directory!" unless ( -d _ );
-            die "$dir exists but is read-only!"       unless ( -w _ );
-            next MKDIR_LOOP;
-        }
-
-        make_path( $dir, { verbose => $opts{verbose} ? 1 : 0 });
-    }
 
     my $pkg_type = $opts{pkg} || $opts{pkgtype} || 'bin';
     $pkg_type = lc $pkg_type;
@@ -397,9 +404,21 @@ Package type must be 'bin' or 'src'};
     # Prepare our file name paths for pkgfile and source tarball...
     my $srcfile_fqp = $status->pkgbase . '/' . $module->package;
 
-    $status->destdir( $opts{destdir} ) if $opts{destdir};
-    my $destdir = $status->destdir;
+    my ($destenv, $destdir) = $self->_calc_setdest( $pkg_type );
+    $destdir = $opts{'destdir'} || $status->destdir || $destdir;
     $destdir = Cwd::abs_path( $destdir );
+
+    # Create directories for building and delivering the new package.
+    MKDIR_LOOP:
+    for my $dir ( $status->pkgbase, $destdir ) {
+        if ( -e $dir ) {
+            die "$dir exists but is not a directory!" unless ( -d _ );
+            die "$dir exists but is read-only!"       unless ( -w _ );
+            next MKDIR_LOOP;
+        }
+
+        make_path( $dir, { 'verbose' => $opts{'verbose'} ? 1 : 0 });
+    }
 
     # Prepare our 'makepkg' package building directory,
     # namely the PKGBUILD and source tarball files...
@@ -412,7 +431,7 @@ Package type must be 'bin' or 'src'};
     $self->create_pkgbuild( $self->status->pkgbase, $opts{skiptest} );
 
     # Package it up!
-    local $ENV{PKGDEST} = $destdir;
+    local $ENV{ $destenv } = $destdir;
 
     my $oldcwd = Cwd::getcwd();
     chdir $status->pkgbase or die "chdir: $OS_ERROR";
@@ -586,14 +605,12 @@ sub set_destdir
 
 sub get_destdir
 {
-    my $self = shift;
-    return $self->status->destdir;
+    return shift->status->destdir
 }
 
 sub get_pkgpath
 {
-    my $self = shift;
-    return $self->status->dist;
+    shift->status->dist;
 }
 
 sub get_cpandistdir
@@ -783,7 +800,47 @@ Directory does not exist or is not writeable}
 # PRIVATE INSTANCE METHODS
 #-----------------------------------------------------------------------------
 
+#---HELPER METHOD---
+# Caculates where we should store our built package.
+# (does not take into account our $self->status state or parameters)
+#
+# Returns the environment variable we should override as well as the
+# value we should set it to.
+sub _calc_setdest
+{
+    my ($self, $pkg_type) = @_;
+
+    my $destenv = ( $pkg_type eq 'src' ? 'SRCPKGDEST' : 'PKGDEST' );
+    my $destdir = ( $ENV{ $destenv }
+                    || ( $pkg_type eq 'src' ? $SRCPKGDEST : $PKGDEST )
+                    || $self->_fallback_destdir );
+
+    return ( $destenv, $destdir );
+}
+
+#---HELPER METHOD---
+# Returns the default base directory that our separate build and
+# package cache directories append themselves to.
+# Example: ~/.cpanplus/5.12.1/pacman
+sub _cpanp_user_basedir
+{
+    my $conf = shift->parent->parent->configure_object;
+    return catdir( $conf->get_conf('base'),
+                   ( sprintf '%vd', $PERL_VERSION ),
+                   'pacman' );
+}
+
+#---HELPER METHOD---
+# Returns the default package cache directory when no other directory
+# is specified by many other means. This directory is inside the
+# $HOME/.cpanplus directory for each different user.
+sub _fallback_destdir
+{
+    catdir( shift->_cpanp_user_basedir, 'pkg' );
+}
+
 #---HELPER FUNCTION---
+# Decide if the dist. is named after the module.
 sub _is_main_module
 {
     my ($mod_name, $dist_name) = @_;
@@ -895,15 +952,20 @@ sub _translate_cpan_deps
         my $cpanpkg = $modobj->package_name;
         my $pkgname = dist_pkgname( $cpanpkg );
 
-        # If two module prereqs are in the same distribution ("package") file
-        # then try to choose the one with the same name as the file...
-        if ( exists $pkgdeps{ $pkgname } ) {
-            next CPAN_DEP_LOOP unless _is_main_module( $modname, $cpanpkg );
-        }
+        # If the dep is for a module inside the CPAN distribution
+        # ignore the version number. (There is no way to cross
+        # reference old module versions to find which version of
+        # distribution provides them)
+        undef $depver unless _is_main_module( $modname, $cpanpkg );
 
-        # TODO: what to do about module version requirements that aren't
-        #       identical to CPAN dist/pkg versions? 
-        $pkgdeps{ $pkgname } = ( $depver ? dist_pkgver( $depver ) : '0' );
+        # XXX: We pray that the module version is the same as the
+        # distribution version...
+        
+        # If two module prereqs are in the same CPAN distribution then
+        # the version required for the main module will override.
+        # (because versions specified for other modules in the dist
+        # are 0)
+        $pkgdeps{ $pkgname } ||= ( $depver ? dist_pkgver( $depver ) : 0 );
     }
 
     return \%pkgdeps;
@@ -930,16 +992,19 @@ sub _get_pkg_deps
     # convert them into packages names for 'depends' and 'makedepends'
     # inside of a PKGBUILD.
 
-    my $pkgdeps_ref   = $self->_translate_cpan_deps( $prereqs );
-    my $makedeps_ref  = $self->_extract_makedepends( $pkgdeps_ref );
-    my $cfgdeps_ref   = $self->_translate_cpan_deps
-        ( $self->status->metadeps->{'cfg'} );
-    my $builddeps_ref = $self->_translate_cpan_deps
-        ( $self->status->metadeps->{'build'} );
+    my $pkgdeps_ref  = $self->_translate_cpan_deps( $prereqs );
+    my $makedeps_ref = $self->_extract_makedepends( $pkgdeps_ref );
+
+    # Merge 'configure_requires' and 'build_requires' from META.yml into
+    # the makedepends for PKGBUILD.
+    my ( $cfgdeps_ref, $builddeps_ref ) =
+        ( map { $self->_translate_cpan_deps( $_ ) }
+          map { $self->status->metadeps->{ $_ }   }
+          qw/ cfg build / );
 
     # 'configure_requires' from META.yml don't show in the prereqs()
-    # results but I think 'build_requires' do
-    for ( keys %$builddeps_ref ) { delete $pkgdeps_ref->{ $_ }; }
+    # results but 'build_requires' do... remove them.
+    delete $pkgdeps_ref->{ $_ } for ( keys %$builddeps_ref );
     _merge_deps( $makedeps_ref, $cfgdeps_ref );
     _merge_deps( $makedeps_ref, $builddeps_ref );
 
@@ -947,7 +1012,7 @@ sub _get_pkg_deps
     my $xs_deps = $self->_translate_xs_deps;
     _merge_deps( $pkgdeps_ref, $xs_deps );
     
-    # Require perl unless we have a dependency on a perl module or perl
+    # Require perl unless we have a dependency on a module or perl itself.
     $pkgdeps_ref->{'perl'} = 0 unless grep { /^perl/ } keys %$pkgdeps_ref;
 
     return { 'depends' => $pkgdeps_ref, 'makedepends' => $makedeps_ref };
@@ -1179,19 +1244,12 @@ sub _prepare_status
     my $module   = $self->parent; # CPANPLUS::Module
     my $conf     = $module->parent->configure_object;
 
-    my $our_base = catdir( $conf->get_conf('base'),
-                           ( sprintf "%vd", $PERL_VERSION ),
-                           'pacman' );
-
-    $status->destdir( $ENV{PKGDEST} ||
-                      $PKGDEST      ||
-                      catdir( $our_base, 'pkg' ) );
-
     my ($pkgver, $pkgname)
         = ( dist_pkgver( $module->package_version ),
             dist_pkgname( $module->package_name));
 
-    my $pkgbase = catdir( $our_base, 'build', "$pkgname-$pkgver" );
+    my $pkgbase = catdir( $self->_cpanp_user_basedir,
+                          'build', "$pkgname-$pkgver" );
 
     foreach ( $pkgname, $pkgver, $pkgbase ) {
         die "A package variable is invalid" unless defined;
