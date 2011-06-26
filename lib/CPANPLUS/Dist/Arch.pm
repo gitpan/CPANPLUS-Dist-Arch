@@ -6,7 +6,7 @@ use strict;
 use CPANPLUS::Dist::Base   qw();
 use Exporter               qw(import);
 
-our $VERSION     = '1.12';
+our $VERSION     = '1.13';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -23,7 +23,7 @@ use File::Copy             qw(copy);
 use File::stat             qw(stat);
 use DynaLoader             qw();
 use IPC::Cmd               qw(can_run);
-use version                qw(qv);
+use version                qw();
 use English                qw(-no_match_vars);
 use Carp                   qw(carp croak confess);
 use Cwd                    qw();
@@ -141,10 +141,10 @@ check() {
   cd "$_distdir"
   ( export PERL_MM_USE_DEFAULT=1 PERL5LIB=""
 [% IF is_makemaker -%]
-    [% IF skiptest %]#[% END %]make test
+    make test
 [% END -%]
 [% IF is_modulebuild -%]
-    [% IF skiptest %]#[% END %]/usr/bin/perl Build test
+    /usr/bin/perl Build test
 [% END -%]
   )
 }
@@ -428,23 +428,29 @@ Package type must be 'bin' or 'src'};
             or error "Failed to create link to $tarball_fqp: $OS_ERROR";
     }
 
-    $self->create_pkgbuild( $self->status->pkgbase, $opts{skiptest} );
+    $self->create_pkgbuild( $self->status->pkgbase );
 
     # Package it up!
     local $ENV{ $destenv } = $destdir;
 
+    my @cmdopts = (($EUID == 0)         => '--asroot',
+                   ($pkg_type eq 'src') => '--source',
+                   $opts{'nocolor'}     => '--nocolor',
+                   $opts{'skiptest'}    => '--nocheck',
+                   $opts{'quiet'}       => '2>&1 >/dev/null');
+    my $i = 0;
+    while ($i < @cmdopts) {
+        if ($cmdopts[$i]) {
+            splice @cmdopts, $i++, 1;
+        }
+        else {
+            splice @cmdopts, $i, 2;
+        }
+    }
+
     my $oldcwd = Cwd::getcwd();
     chdir $status->pkgbase or die "chdir: $OS_ERROR";
-    my $makepkg_cmd = join q{ }, ( 'makepkg',
-                                   '-f', # should we force rebuilding?
-                                   ( $EUID == 0         ? '--asroot'  : () ),
-                                   ( $pkg_type eq 'src' ? '--source'  : () ),
-                                   ( $opts{nocolor}     ? '--nocolor' : () ),
-                                   ( $opts{quiet}       ? '2>&1 >/dev/null'
-                                                        : () ),
-                                  );
-
-    # I tried to use IPC::Cmd here, but colors didn't work...
+    my $makepkg_cmd = join q{ }, 'makepkg', '-f', @cmdopts;
     system $makepkg_cmd;
 
     if ( $CHILD_ERROR ) {
@@ -742,7 +748,7 @@ sub get_pkgbuild_templ
 sub get_pkgbuild
 {
     croak 'Invalid arguments to get_pkgbuild' if ( @_ < 1 );
-    my ($self, $skiptest) = @_;
+    my ($self) = @_;
 
     my $status  = $self->status;
     my $module  = $self->parent;
@@ -755,12 +761,11 @@ sub get_pkgbuild
 
     # Quote our package desc for bash.
     $pkgvars{pkgdesc} =~ s/ ([\$\"\`]) /\\$1/gxms;
-    
+
     my $templ_vars = { packager  => $ENV{PACKAGER} || $PACKAGER,
                        version   => $VERSION,
                        %pkgvars,
                        distdir   => $self->get_cpandistdir(),
-                       skiptest  => $skiptest || $conf->get_conf('skiptest'),
                       };
 
     my $dist_type = $module->status->installer_type;
@@ -777,13 +782,13 @@ sub get_pkgbuild
 sub create_pkgbuild
 {
     croak 'Invalid arguments to create_pkgbuild' if ( @_ < 2 );
-    my ($self, $destdir, $skiptest) = @_;
+    my ($self, $destdir) = @_;
 
     croak qq{Invalid directory passed to create_pkgbuild: "$destdir" ...
 Directory does not exist or is not writeable}
         unless ( -d $destdir && -w _ );
 
-    my $pkgbuild_text = $self->get_pkgbuild( $skiptest );
+    my $pkgbuild_text = $self->get_pkgbuild();
     my $fqpath        = catfile( $destdir, 'PKGBUILD' );
 
     open my $pkgbuild_file, '>', $fqpath
@@ -857,9 +862,12 @@ sub _merge_deps
 
     MERGE_LOOP:
     while ( my ( $pkg, $ver ) = each %$right_deps ) {
-        next MERGE_LOOP if $left_deps->{ $pkg } &&
-            ( qv($left_deps->{ $pkg }) > qv($ver) );
+        if ( $left_deps->{ $pkg } ) {
+            my $leftver  = version->parse( $left_deps->{ $pkg } );
+            my $rightver = version->parse( $ver );
 
+            next MERGE_LOOP if $leftver > $rightver;
+        }
         $left_deps->{ $pkg } = $ver;
     }
 
@@ -943,7 +951,15 @@ sub _translate_cpan_deps
         # otherwise trailing zeros cause problems
         my $bundled_version = $Module::CoreList::version{ 0+$] }->{$modname};
         if ( defined $bundled_version ) {
-            next CPAN_DEP_LOOP if ( qv($bundled_version) >= qv($depver) );
+            # Avoid parsing an empty string (causes an error) or 0.
+            next CPAN_DEP_LOOP unless $depver;
+
+            # Avoid parsing a bundled version of 0. Is this possible?
+            if ( $bundled_version ) {
+                my $bundle_vobj = version->parse( $bundled_version );
+                my $dep_vobj    = version->parse( $depver );
+                next CPAN_DEP_LOOP if $bundle_vobj >= $dep_vobj;
+            }
         }
 
         # Translate the module's distribution name into a package name...
