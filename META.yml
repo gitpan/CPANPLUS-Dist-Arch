@@ -6,8 +6,9 @@ build_requires:
   Net::Ping: 0
   Test::More: 0
 configure_requires:
-  Module::Build: 0.36
-generated_by: 'Module::Build version 0.3603'
+  Module::Build: 0.38
+dynamic_config: 1
+generated_by: 'Module::Build version 0.38, CPAN::Meta::Converter version 2.110930001'
 license: perl
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
@@ -16,7 +17,7 @@ name: CPANPLUS-Dist-Arch
 provides:
   CPANPLUS::Dist::Arch:
     file: lib/CPANPLUS/Dist/Arch.pm
-    version: 1.15
+    version: 1.16
 requires:
   Archive::Tar: 0
   CPANPLUS: 0
@@ -40,4 +41,4 @@ requires:
   version: 0
 resources:
   repository: http://github.com/juster/perl-cpanplus-dist-arch
-version: 1.15
+version: 1.16

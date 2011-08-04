@@ -6,7 +6,7 @@ use strict;
 use CPANPLUS::Dist::Base   qw();
 use Exporter               qw(import);
 
-our $VERSION     = '1.15';
+our $VERSION     = '1.16';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -909,7 +909,7 @@ sub _extract_makedepends
 sub _translate_perl_ver
 {
     my ($perlver) = @_;
-    return $perlver unless $perlver =~ /\A(\d+)[.](\d{3})(\d{1,3})\z/;
+    return $perlver unless $perlver =~ /\Av?(\d+)[.](\d{3})(\d{1,3})\z/;
 
     # Re-apply the missing trailing zeroes.
     my $patch = $3;
@@ -972,20 +972,18 @@ sub _translate_cpan_deps
         my $cpanpkg = $modobj->package_name;
         my $pkgname = dist_pkgname( $cpanpkg );
 
-        # If the dep is for a module inside the CPAN distribution
-        # ignore the version number. (There is no way to cross
-        # reference old module versions to find which version of
-        # distribution provides them)
-        undef $depver unless _is_main_module( $modname, $cpanpkg );
-
-        # XXX: We pray that the module version is the same as the
-        # distribution version...
-        
         # If two module prereqs are in the same CPAN distribution then
         # the version required for the main module will override.
         # (because versions specified for other modules in the dist
         # are 0)
-        $pkgdeps{ $pkgname } ||= ( $depver ? dist_pkgver( $depver ) : 0 );
+        undef $depver unless _is_main_module( $modname, $cpanpkg );
+
+        # XXX: We pray that the module version is the same as the
+        # distribution version...
+
+        # Version strings of '0.0' caused problems...
+        $depver = ( $depver == 0 ? 0 : dist_pkgver( $depver ));
+        $pkgdeps{ $pkgname } ||= $depver;
     }
 
     return \%pkgdeps;
@@ -1337,6 +1335,7 @@ sub _calc_tarballmd5
 #    my $tarball_fqp = $self->status->pkgbase . '/' . $module->package;
     open my $distfile, '<', $tarball_fqp
         or die "failed to get md5 of $tarball_fqp: $OS_ERROR";
+    binmode $distfile;
 
     my $md5 = Digest::MD5->new;
     $md5->addfile($distfile);
