@@ -1,12 +1,12 @@
 package CPANPLUS::Dist::Arch;
 
-use warnings;
+use warnings 'FATAL' => 'all';
 use strict;
 
 use CPANPLUS::Dist::Base   qw();
 use Exporter               qw(import);
 
-our $VERSION     = '1.17';
+our $VERSION     = '1.18';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -76,7 +76,6 @@ Gtk2           = gtk2-perl
 Cairo          = cairo-perl
 Pango          = pango-perl
 
-SDL_Perl       = sdl_perl
 Perl-Critic    = perl-critic
 Perl-Tidy      = perl-tidy
 App-Ack        = ack
@@ -116,6 +115,9 @@ makedepends=([% makedepends %])
 url='[% url %]'
 source=('[% source %]')
 md5sums=('[% md5sums %]')
+[% IF sha512sums -%]
+sha512sums=('[% sha512sums %]')
+[% END -%]
 _distdir="${srcdir}/[% distdir %]"
 
 build() {
@@ -238,6 +240,8 @@ READ_CONF:
     close $mkpkgconf or error "close on makepkg.conf: $!";
 }
 
+# Environment variable has second highest priority for PACKAGER.
+$PACKAGER = $ENV{PACKAGER} if $ENV{PACKAGER};
 
 #-----------------------------------------------------------------------------
 # PUBLIC CPANPLUS::Dist::Base Interface
@@ -674,6 +678,10 @@ sub get_pkgvars
         unless ( $status->prepared );
 
     my $deps_ref = $self->_get_pkg_deps;
+    my @shavars;
+    if ( eval { require Digest::SHA } ) {
+        @shavars = ('sha512sums' => $self->_calc_shasum(512));
+    }
 
     return ( pkgname  => $status->pkgname,
              pkgver   => $status->pkgver,
@@ -687,6 +695,7 @@ sub get_pkgvars
              url      => $self->_get_disturl,
              source   => $self->_get_srcurl,
              md5sums  => $self->_calc_tarballmd5,
+             @shavars,
 
              depshash => $deps_ref,
             );
@@ -762,7 +771,7 @@ sub get_pkgbuild
     # Quote our package desc for bash.
     $pkgvars{pkgdesc} =~ s/ ([\$\"\`]) /\\$1/gxms;
 
-    my $templ_vars = { packager  => $ENV{PACKAGER} || $PACKAGER,
+    my $templ_vars = { packager  => $PACKAGER,
                        version   => $VERSION,
                        %pkgvars,
                        distdir   => $self->get_cpandistdir(),
@@ -957,17 +966,12 @@ sub _translate_cpan_deps
 
         # 0+$] is needed to force the perl version into number-dom
         # otherwise trailing zeros cause problems
-        my $bundled_version = $Module::CoreList::version{ 0+$] }->{$modname};
-        if ( defined $bundled_version ) {
-            # Avoid parsing an empty string (causes an error) or 0.
-            next CPAN_DEP_LOOP unless $depver;
-
-            # Avoid parsing a bundled version of 0. Is this possible?
-            if ( $bundled_version ) {
-                my $bundle_vobj = version->parse( $bundled_version );
-                my $dep_vobj    = version->parse( $depver );
-                next CPAN_DEP_LOOP if $bundle_vobj >= $dep_vobj;
-            }
+        my $corever = $Module::CoreList::version{ 0+$] }->{$modname};
+        if ( $corever ) {
+            next CPAN_DEP_LOOP unless $depver; # avoids empty string
+            my $corev = version->parse( $corever );
+            my $depv  = version->parse( $depver );
+            next CPAN_DEP_LOOP if $corev >= $depv;
         }
 
         # Translate the module's distribution name into a package name...
@@ -986,7 +990,7 @@ sub _translate_cpan_deps
         # distribution version...
 
         # Version strings of '0.0' caused problems...
-        $depver = ( $depver == 0 ? 0 : dist_pkgver( $depver ));
+        $depver = ( !$depver || $depver == 0 ? 0 : dist_pkgver( $depver ));
         $pkgdeps{ $pkgname } ||= $depver;
     }
 
@@ -1336,7 +1340,6 @@ sub _calc_tarballmd5
     my $module = $self->parent;
 
     my $tarball_fqp = $module->_status->fetch;
-#    my $tarball_fqp = $self->status->pkgbase . '/' . $module->package;
     open my $distfile, '<', $tarball_fqp
         or die "failed to get md5 of $tarball_fqp: $OS_ERROR";
     binmode $distfile;
@@ -1347,6 +1350,26 @@ sub _calc_tarballmd5
 
     return $md5->hexdigest;
 }
+
+#---INSTANCE METHOD---
+# Usage    : my $shasum = $self->calc_shasum(512);
+# Params   : The bitsizes to use for the SHA digest calculated.
+# Throws   : failed to get sha<size>sum of <tarball>:\n...
+# Returns  : Hex-string checksum of the tarball for the bit size
+#            provided as a parameter.
+#---------------------
+sub _calc_shasum
+{
+    my ($self, $size) = @_;
+    my $module = $self->parent;
+    my $fqp    = $module->_status->fetch;
+    my $sum    = eval {
+        Digest::SHA->new( $size )->addfile( $fqp, q{b} )->hexdigest;
+    };
+    return $sum if $sum;
+    die "failed to get sha${size}sum of $fqp:\n$EVAL_ERROR";
+}
+
 
 #---HELPER FUNCTION---
 # Purpose : Split the text into everything before the tags, inside tags, and
