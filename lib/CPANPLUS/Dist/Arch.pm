@@ -6,7 +6,7 @@ use strict;
 use CPANPLUS::Dist::Base   qw();
 use Exporter               qw(import);
 
-our $VERSION     = '1.19';
+our $VERSION     = '1.20';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -948,6 +948,7 @@ sub _translate_cpan_deps
         # Sometimes a perl version is given as a prerequisite
         if ( $modname eq 'perl' ) {
             $pkgdeps{perl} = _translate_perl_ver( $depver );
+            _DEBUG "req on perl $depver -> $pkgdeps{perl}";
             next CPAN_DEP_LOOP;
         }
 
@@ -1029,8 +1030,12 @@ sub _get_pkg_deps
           qw/ cfg build / );
 
     # 'configure_requires' from META.yml don't show in the prereqs()
-    # results but 'build_requires' do... remove them.
-    delete $pkgdeps_ref->{ $_ } for ( keys %$builddeps_ref );
+    # results but 'build_requires' do... remove duplicates.
+    for my $d ( keys %$builddeps_ref ) {
+        if ( eval { $pkgdeps_ref->{$d} eq $builddeps_ref->{$d} } ) {
+            delete $pkgdeps_ref->{$d}
+        }
+    }
     _merge_deps( $makedeps_ref, $cfgdeps_ref );
     _merge_deps( $makedeps_ref, $builddeps_ref );
 
@@ -1236,8 +1241,15 @@ sub _scan_metayml
     # Default to an empty list of deps
     $status->metadeps( { 'cfg' => {}, 'build' => {} } );
 
-    my $metapath = catfile( $modobj->status->extract, 'META.yml' );
-    return unless -f $metapath;
+    my $metapath;
+    for my $ext (qw/json yml/) {
+        my $p = catfile( $modobj->status->extract, "META.$ext" );
+        if ( -f $p ) {
+            $metapath = $p;
+            last;
+        }
+    }
+    return unless $metapath;
     
     my $meta_ref = eval { Parse::CPAN::Meta::LoadFile( $metapath ) }
         or return;
