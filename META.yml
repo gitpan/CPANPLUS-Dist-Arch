@@ -17,7 +17,7 @@ name: CPANPLUS-Dist-Arch
 provides:
   CPANPLUS::Dist::Arch:
     file: lib/CPANPLUS/Dist/Arch.pm
-    version: 1.20
+    version: 1.21
 requires:
   Archive::Tar: 0
   CPANPLUS: 0
@@ -41,4 +41,4 @@ requires:
   version: 0
 resources:
   repository: http://github.com/juster/perl-cpanplus-dist-arch
-version: 1.20
+version: 1.21
