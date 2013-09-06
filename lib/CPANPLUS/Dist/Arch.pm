@@ -6,7 +6,7 @@ use strict;
 use CPANPLUS::Dist::Base   qw();
 use Exporter               qw(import);
 
-our $VERSION     = '1.26';
+our $VERSION     = '1.27';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -107,9 +107,7 @@ arch=([% arch %])
 license=('PerlArtistic' 'GPL')
 options=('!emptydirs')
 depends=([% depends %])
-[% IF makedepends -%]
 makedepends=([% makedepends %])
-[% END -%]
 [% IF checkdepends -%]
 checkdepends=([% checkdepends %])
 [% END -%]
@@ -696,8 +694,10 @@ sub get_pkgvars
     if (eval { require Digest::SHA }) {
         $vars{'sha512sums'} = $self->_calc_shasum(512);
     }
-    for (qw/depends makedepends checkdepends conflicts/) {
-        if ($pkglinks->{$_}) {
+
+	$vars{$_} = _specstr($pkglinks->{$_}) for (qw/depends makedepends/);
+    for (qw/checkdepends conflicts/) {
+        if (@{$pkglinks->{$_}}) {
             $vars{$_} = _specstr($pkglinks->{$_});
         }
     }
