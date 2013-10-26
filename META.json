@@ -53,7 +53,7 @@
    "provides" : {
       "CPANPLUS::Dist::Arch" : {
          "file" : "lib/CPANPLUS/Dist/Arch.pm",
-         "version" : "1.27"
+         "version" : "1.28"
       }
    },
    "release_status" : "stable",
@@ -62,5 +62,5 @@
          "url" : "http://github.com/juster/perl-cpanplus-dist-arch"
       }
    },
-   "version" : "1.27"
+   "version" : "1.28"
 }
