@@ -4,7 +4,7 @@
       "Justin Davis < juster at cpan dot org >"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "Module::Build version 0.3901, CPAN::Meta::Converter version 2.132140",
+   "generated_by" : "Module::Build version 0.4205",
    "license" : [
       "perl_5"
    ],
@@ -14,15 +14,9 @@
    },
    "name" : "CPANPLUS-Dist-Arch",
    "prereqs" : {
-      "build" : {
-         "requires" : {
-            "Net::Ping" : "0",
-            "Test::More" : "0"
-         }
-      },
       "configure" : {
          "requires" : {
-            "Module::Build" : "0.39"
+            "Module::Build" : "0.42"
          }
       },
       "runtime" : {
@@ -48,12 +42,17 @@
             "Text::Wrap" : "0",
             "version" : "0"
          }
+      },
+      "test" : {
+         "requires" : {
+            "Test::More" : "0"
+         }
       }
    },
    "provides" : {
       "CPANPLUS::Dist::Arch" : {
          "file" : "lib/CPANPLUS/Dist/Arch.pm",
-         "version" : "1.28"
+         "version" : "1.29"
       }
    },
    "release_status" : "stable",
@@ -62,5 +61,5 @@
          "url" : "http://github.com/juster/perl-cpanplus-dist-arch"
       }
    },
-   "version" : "1.28"
+   "version" : "1.29"
 }

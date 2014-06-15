@@ -6,7 +6,7 @@ use strict;
 use CPANPLUS::Dist::Base   qw();
 use Exporter               qw(import);
 
-our $VERSION     = '1.28';
+our $VERSION     = '1.29';
 our @EXPORT      = qw();
 our @EXPORT_OK   = qw(dist_pkgname dist_pkgver);
 our %EXPORT_TAGS = ( 'all' => [ @EXPORT_OK ] );
@@ -476,7 +476,7 @@ Package type must be 'bin' or 'src'};
 }
 
 #---INTERFACE METHOD---
-# Purpose  : Installs the package file (.pkg.tar.gz) using sudo and
+# Purpose  : Installs the package file (.pkg.tar.xz) using sudo and
 #            pacman.
 # Comments : Called automatically on pre-requisite packages
 #----------------------
@@ -501,8 +501,11 @@ END_ERROR
 
     die "Package file $pkgfile_fqp was not found" if ( ! -f $pkgfile_fqp );
 
-    my @pacmancmd = ( 'pacman', '--noconfirm', '-U', $pkgfile_fqp,
-                      ( $Is_dependency ? '--asdeps' : '--asexplicit' ),
+    my @pacmancmd = ( 'pacman',
+                      ($opts{'force'} ? '--force' : ()),
+                      '--noconfirm',
+                      ($Is_dependency ? '--asdeps' : '--asexplicit'),
+                      '-U', $pkgfile_fqp,
                      );
 
     # Make sure the user has access to install a package...
@@ -1059,11 +1062,15 @@ sub _transperlver
 # Translate a single CPAN dependency version specification.
 sub _scanvspec
 {
-    my ($vspec, $conflicts) = @_;
+    my ($vspec) = @_;
 
-    # The simplest case is a version.
+    ## The module author forgot to specify a version in the (one) dependency.
+    return 0 if (!defined $vspec);
+
+    ## The simplest case is a version string.
     return $vspec if ($vspec =~ /^[0-9a-zA-Z._-]+$/);
 
+    ## Combinations of complicated version specifications are also possible.
     my @specs;
     for my $opver (split /\s*,\s*/, $vspec) {
         if ($opver !~ /^([<>]=?|[!=]=) +([0-9a-zA-Z._-]+)$/) {
@@ -1083,7 +1090,7 @@ sub _scanvspecs
 {
     my ($specs, $deps, $cons) = @_;
     while (my ($k, $v) = each %$specs) {
-        my $vs = _scanvspec($v);
+        my $vs = _scanvspec($v); # $vs is either a version string or an array-ref.
         unless (ref $vs) {
             push @$deps, [ $k, '>=', $vs ];
             next;
@@ -1091,6 +1098,8 @@ sub _scanvspecs
         for my $x (@$vs) {
             my ($op, $ver) = @$x;
             if ($op eq '!=') {
+                ## When $cons is elided, that means we are scanning conflict version specs.
+                ## The '!=' spec specifies a conflict. What is a conflict of a conflict?
                 unless (defined $cons) {
                     die qq{unable to process "$k != $ver" in a conficts list};
                 }

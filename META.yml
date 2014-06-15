@@ -3,42 +3,41 @@ abstract: 'CPANPLUS backend for building Archlinux pacman packages'
 author:
   - 'Justin Davis < juster at cpan dot org >'
 build_requires:
-  Net::Ping: 0
-  Test::More: 0
+  Test::More: '0'
 configure_requires:
-  Module::Build: 0.39
+  Module::Build: '0.42'
 dynamic_config: 1
-generated_by: 'Module::Build version 0.3901, CPAN::Meta::Converter version 2.132140'
+generated_by: 'Module::Build version 0.4205, CPAN::Meta::Converter version 2.140640'
 license: perl
 meta-spec:
   url: http://module-build.sourceforge.net/META-spec-v1.4.html
-  version: 1.4
+  version: '1.4'
 name: CPANPLUS-Dist-Arch
 provides:
   CPANPLUS::Dist::Arch:
     file: lib/CPANPLUS/Dist/Arch.pm
-    version: 1.28
+    version: '1.29'
 requires:
-  Archive::Tar: 0
-  CPANPLUS: 0
-  Carp: 0
-  Cwd: 0
-  Digest::MD5: 0
-  DynaLoader: 0
-  File::Copy: 0
+  Archive::Tar: '0'
+  CPANPLUS: '0'
+  Carp: '0'
+  Cwd: '0'
+  Digest::MD5: '0'
+  DynaLoader: '0'
+  File::Copy: '0'
   File::Path: 2.06_05
-  File::Spec::Functions: 0
-  File::stat: 0
-  Getopt::Long: 0
-  IO::Zlib: 0
-  IPC::Cmd: 0
-  Module::CoreList: 0
-  POSIX: 0
-  Pod::Select: 0
-  Pod::Usage: 0
-  Term::ANSIColor: 0
-  Text::Wrap: 0
-  version: 0
+  File::Spec::Functions: '0'
+  File::stat: '0'
+  Getopt::Long: '0'
+  IO::Zlib: '0'
+  IPC::Cmd: '0'
+  Module::CoreList: '0'
+  POSIX: '0'
+  Pod::Select: '0'
+  Pod::Usage: '0'
+  Term::ANSIColor: '0'
+  Text::Wrap: '0'
+  version: '0'
 resources:
   repository: http://github.com/juster/perl-cpanplus-dist-arch
-version: 1.28
+version: '1.29'
